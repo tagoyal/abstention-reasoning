@@ -1,0 +1,9 @@
+Solve this math problem.
+
+{problem}
+
+Think through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and IMMEDIATELY provide your final answer in <answer> </answer> tags with no text in between.
+
+To help you to solve this problem, an expert has provided the following partial solution. Assume that this partial solution is correct and build on it to solve the problem.
+
+{hint sequence}

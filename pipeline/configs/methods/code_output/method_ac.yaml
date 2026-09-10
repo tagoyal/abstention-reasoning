@@ -1,0 +1,3 @@
+template_variant: method_ac
+reward_function: compute_score
+reward_kwargs: {}
