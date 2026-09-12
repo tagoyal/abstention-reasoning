@@ -6,4 +6,4 @@ Think through this step by step in <think> </think> tags. When you are finished 
 
 To help you to solve this problem, an expert has provided the following partial solution. Assume that this partial solution is correct and build on it to solve the problem.
 
-{hint sequence}
+{hint_sequence}

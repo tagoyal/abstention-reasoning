@@ -1,5 +1,5 @@
 Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations (+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>.
 
-To help you to solve this problem, an expert has provided the following partial solution. Assume that this partial solution is correct and build on it to solve the problem.
+To help you to solve this problem, an expert may have provided a partial solution. If provided, assume that this partial solution is correct and build on it to solve the problem.
 
-{hint sequence}
+Partial Solution: {hint_sequence}

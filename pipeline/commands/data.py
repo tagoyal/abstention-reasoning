@@ -3,6 +3,7 @@ Data commands - primitives and prompts creation.
 """
 
 import inspect
+import random
 from pathlib import Path
 
 from pipeline.core.io import load_json, save_json, save_parquet
@@ -244,6 +245,13 @@ def _create_prompts_single(
 
     # Determine format from output path
     fmt = "parquet" if str(output_path).endswith(".parquet") else "json"
+    is_method_ac = method is not None and method.name == "method_ac"
+    if is_method_ac and num_hints is None:
+        raise ValueError("method_ac requires --num-hints")
+    if is_method_ac and num_hints is not None and num_hints < 0:
+        raise ValueError(f"num_hints must be non-negative, got {num_hints}")
+    if is_method_ac and num_hints == 0:
+        raise ValueError("method_ac requires --num-hints to be greater than 0")
 
     # For RL splits (parquet), store primitives only - template applied at runtime
     # For other splits (json), apply template now
@@ -258,6 +266,24 @@ def _create_prompts_single(
 
         records = []
         for primitive in primitives:
+            if is_method_ac and num_hints is not None:
+                hints_list = primitive.get("hint_exprs", [])
+                if not hints_list:
+                    prefix_hints = primitive.get("prefix_hints", {})
+                    for i in range(1, 7):
+                        key = f"hint_{i}"
+                        if key in prefix_hints:
+                            hints_list.append(prefix_hints[key])
+                max_hint_level = min(num_hints, len(hints_list))
+                if split_name == "eval":
+                    hint_levels = range(max_hint_level + 1)
+                else:
+                    hint_levels = [
+                        random.Random(seed + primitive["index"]).randint(
+                            0, max_hint_level
+                        )
+                    ]
+
             # Enrich primitive with derived fields if task supports it
             # (verl's runtime template does simple substitution, so we pre-compute fields)
             if hasattr(task, 'enrich_primitive_for_rl'):
@@ -267,31 +293,58 @@ def _create_prompts_single(
 
             ground_truth = task.get_ground_truth(primitive)
 
-            # Build extra_info with interaction_kwargs for SGLang multi-turn
-            extra_info = {
-                "index": primitive["index"],
-            }
-            if interaction_name is not None:
-                extra_info["interaction_kwargs"] = {
-                    "name": interaction_name,
-                    "ground_truth": ground_truth,
-                }
+            if not is_method_ac:
+                hint_levels = [None]
 
-            record = {
-                "index": primitive["index"],
-                "primitive": enriched_primitive,  # Store enriched primitive for runtime template
-                "ground_truth": ground_truth,
-                "variant": primitive.get("variant", "unknown"),
-                "split": split_name,
-                "data_source": task_name,
-                "assistant_prefix": assistant_prefix,  # For verl runtime consistency
-                "extra_info": extra_info,  # For SGLang interaction system
-                "reward_model": {
-                    "style": "rule",
+            for hint_level in hint_levels:
+                hint_sequence = (
+                    "No partial solution"
+                    if hint_level == 0
+                    else "\n".join(hints_list[:hint_level])
+                    if task_name == "competition_math"
+                    else hints_list[hint_level - 1]
+                    if hint_level is not None
+                    else None
+                )
+                record_index = (
+                    primitive["index"] * (num_hints + 1) + hint_level
+                    if is_method_ac and split_name == "eval"
+                    else primitive["index"]
+                )
+                record_primitive = (
+                    {**enriched_primitive, "hint_sequence": hint_sequence}
+                    if is_method_ac
+                    else enriched_primitive
+                )
+
+                # Build extra_info with interaction_kwargs for SGLang multi-turn
+                extra_info = {
+                    "index": record_index,
+                }
+                if interaction_name is not None:
+                    extra_info["interaction_kwargs"] = {
+                        "name": interaction_name,
+                        "ground_truth": ground_truth,
+                    }
+
+                record = {
+                    "index": record_index,
+                    "primitive": record_primitive,  # Store enriched primitive for runtime template
                     "ground_truth": ground_truth,
-                },
-            }
-            records.append(record)
+                    "variant": primitive.get("variant", "unknown"),
+                    "split": split_name,
+                    "data_source": task_name,
+                    "assistant_prefix": assistant_prefix,  # For verl runtime consistency
+                    "extra_info": extra_info,  # For SGLang interaction system
+                    "reward_model": {
+                        "style": "rule",
+                        "ground_truth": ground_truth,
+                    },
+                }
+                if is_method_ac:
+                    record["source_index"] = primitive["index"]
+                    record["hint_level"] = hint_level
+                records.append(record)
 
         # Print reminder for verl config
         if assistant_prefix:
@@ -329,7 +382,49 @@ def _create_prompts_single(
                         key = f"hint_{i}"
                         if key in prefix_hints:
                             hints_list.append(prefix_hints[key])
+                if is_method_ac:
+                    max_hint_level = min(num_hints, len(hints_list))
+                    if split_name == "eval":
+                        hint_levels = range(max_hint_level + 1)
+                    else:
+                        hint_levels = [
+                            random.Random(seed + primitive["index"]).randint(
+                                0, max_hint_level
+                            )
+                        ]
                 primitive = {**primitive, "hints": hints_list[:num_hints]}
+
+            if is_method_ac:
+                ground_truth = task.get_ground_truth(primitive)
+                for hint_level in hint_levels:
+                    hint_sequence = (
+                        "No partial solution"
+                        if hint_level == 0
+                        else "\n".join(hints_list[:hint_level])
+                        if task_name == "competition_math"
+                        else hints_list[hint_level - 1]
+                    )
+                    prompt = task.format_prompt(
+                        primitive,
+                        template.replace("{hint_sequence}", hint_sequence),
+                        include_assistant_prefix,
+                    )
+                    record = {
+                        "index": (
+                            primitive["index"] * (num_hints + 1) + hint_level
+                            if split_name == "eval"
+                            else primitive["index"]
+                        ),
+                        "source_index": primitive["index"],
+                        "hint_level": hint_level,
+                        "hint_sequence": hint_sequence,
+                        "prompt": prompt,
+                        "ground_truth": ground_truth,
+                        "variant": primitive.get("variant", "unknown"),
+                        "split": split_name,
+                    }
+                    records.append(record)
+                continue
 
             prompt = task.format_prompt(primitive, template, include_assistant_prefix)
             ground_truth = task.get_ground_truth(primitive)
