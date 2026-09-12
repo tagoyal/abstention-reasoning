@@ -6,6 +6,7 @@ metadata:
 
 spec:
   queue: bonete52-opp
+  priorityClassName: high
   minAvailable: 1
   
 
@@ -16,6 +17,7 @@ spec:
     template:
       spec:
         schedulerName: volcano
+        priorityClassName: high
         restartPolicy: Never
         imagePullSecrets:
         - name: dockerhub-creds
@@ -44,13 +46,13 @@ spec:
           resources:
             requests:
               nvidia.com/gpu: 1
-              cpu: "1"
-              memory: "4Gi"
+              cpu: "8"
+              memory: "64Gi"
 
             limits:
               nvidia.com/gpu: 1
-              cpu: "1"
-              memory: "4Gi"
+              cpu: "8"
+              memory: "64Gi"
         tolerations:
         - effect: NoSchedule
           key: nvidia.com/gpu

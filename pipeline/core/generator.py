@@ -1044,6 +1044,7 @@ class AsyncGenerator(_SamplingParams):
             List of lists of dicts with 'text', 'finish_reason', 'token_count'
         """
         import uuid
+        from tqdm.auto import tqdm
 
         engine = await self._get_engine()
         tokenizer = await self._get_tokenizer()
@@ -1089,8 +1090,21 @@ class AsyncGenerator(_SamplingParams):
         if self.config.verbose:
             print(f"Starting async generation for {num_prompts} prompts")
 
-        tasks = [process_single_prompt(idx) for idx in range(num_prompts)]
-        await asyncio.gather(*tasks)
+        progress = tqdm(
+            total=num_prompts,
+            desc=f"Generating ({num_samples} sample{'s' if num_samples != 1 else ''}/prompt)",
+            unit="prompt",
+        )
+        tasks = [
+            asyncio.create_task(process_single_prompt(idx))
+            for idx in range(num_prompts)
+        ]
+        for task in tasks:
+            task.add_done_callback(lambda _: progress.update())
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            progress.close()
 
         if self.config.answer_budget > 0:
             await self._force_answers(engine, tokenizer, prompts, results)
@@ -1624,4 +1638,3 @@ class AsyncGenerator(_SamplingParams):
             print(f"\nAsync generation complete: {num_prompts} prompts, {total_hints} total hints, {avg_turns:.1f} avg turns")
 
         return results
-

@@ -5,7 +5,8 @@ metadata:
   namespace: bonete52
 
 spec:
-  queue: bonete52-opp
+  queue: bonete52
+  priorityClassName: high
   minAvailable: 1
 
   tasks:
@@ -15,6 +16,7 @@ spec:
     template:
       spec:
         schedulerName: volcano
+        priorityClassName: high
         restartPolicy: Never
 
         imagePullSecrets:
@@ -32,7 +34,7 @@ spec:
           command:
           - /bin/bash
           - -lc
-          - bash /data/tanyagoyal/abstention-reasoning/initialization_script.sh && bash abstention-reasoning/run_jobs_bonete52.sh
+          - bash /data/tanyagoyal/artifacts/initialization_script.sh && bash abstention-reasoning/run_jobs_bonete52.sh
 
           volumeMounts:
           - name: data

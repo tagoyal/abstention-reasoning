@@ -22,5 +22,5 @@ pip uninstall -y torchao
 pip install -e . 
 pip install -e verl/
 
-#hf download tanyagoyal-p/abstention-reasoning-data   --repo-type dataset   --local-dir /data/tanyagoyal/abstention-reasoning/artifacts
-ln -s /data/tanyagoyal/abstention-reasoning/artifacts artifacts
+#hf download tanyagoyal-p/abstention-reasoning-data   --repo-type dataset   --local-dir /data/tanyagoyal/artifacts
+ln -sfn /data/tanyagoyal/artifacts artifacts
