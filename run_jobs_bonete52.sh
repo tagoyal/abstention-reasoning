@@ -1,1 +1,0 @@
-python -m pipeline generate --task competition_math --method method_ac --model Qwen/Qwen3-14B --split sft_train --num-samples 8 --sample-strategy random_correct --async
