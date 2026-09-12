@@ -448,6 +448,98 @@ def _create_prompts_single(
     return output_path
 
 
+def create_verification_data(
+    task_name: str,
+    generations_path: Path,
+    output_path: Path,
+    method_name: str = "method_a",
+    num_samples: int = 10,
+    threshold: float = 0.5,
+) -> Path:
+    """Convert multi-sample solver aggregates into binary predictor SFT data."""
+    if num_samples < 1:
+        raise ValueError(f"num_samples must be positive, got {num_samples}")
+    if not 0 <= threshold <= 1:
+        raise ValueError(f"threshold must be between 0 and 1, got {threshold}")
+
+    task = get_task(task_name)
+    method = Method.load(method_name, task_name)
+    template = method.load_template(task_name, "sft")
+    generations = load_json(generations_path)
+
+    records = []
+    positives = 0
+    for source in generations:
+        index = source.get("index")
+        actual_samples = source.get("num_samples")
+        correct_samples = source.get("num_correct_samples")
+
+        if actual_samples != num_samples:
+            raise ValueError(
+                f"Index {index}: expected num_samples={num_samples}, "
+                f"got {actual_samples!r}"
+            )
+        if (
+            not isinstance(correct_samples, int)
+            or not 0 <= correct_samples <= actual_samples
+        ):
+            raise ValueError(
+                f"Index {index}: invalid num_correct_samples={correct_samples!r}"
+            )
+
+        pass_rate = correct_samples / actual_samples
+        recorded_pass_rate = source.get("pass_rate")
+        if (
+            not isinstance(recorded_pass_rate, (int, float))
+            or abs(float(recorded_pass_rate) - pass_rate) > 1e-12
+        ):
+            raise ValueError(
+                f"Index {index}: pass_rate={recorded_pass_rate!r} does not match "
+                f"{correct_samples}/{actual_samples}"
+            )
+
+        hint_sequence = source.get("hint_sequence")
+        ground_truth = source.get("ground_truth")
+        if hint_sequence is None:
+            raise ValueError(f"Index {index}: missing hint_sequence")
+        if not isinstance(ground_truth, dict):
+            raise ValueError(f"Index {index}: missing ground_truth")
+
+        rendered_template = template.replace("{hint_sequence}", hint_sequence)
+        prompt = task.format_prompt(
+            ground_truth,
+            rendered_template,
+            include_assistant_prefix=False,
+        )
+        label = int(pass_rate >= threshold)
+        positives += label
+        records.append({
+            "index": index,
+            "source_index": source.get("source_index", index),
+            "hint_level": source.get("hint_level"),
+            "hint_sequence": hint_sequence,
+            "prompt": prompt,
+            "generation": f"<answer>{label}</answer>",
+            "label": label,
+            # This completion is the gold classification label, so both classes
+            # are valid SFT examples and pass the existing task-level filter.
+            "correct": True,
+            "pass_rate": pass_rate,
+            "num_correct_samples": correct_samples,
+            "num_samples": actual_samples,
+            "variant": source.get("variant", "unknown"),
+            "split": source.get("split"),
+        })
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    save_json(output_path, records)
+    print(
+        f"Saved {len(records)} verification records to {output_path} "
+        f"(label 1: {positives}, label 0: {len(records) - positives})"
+    )
+    return output_path
+
+
 # === OOD (Out-of-Distribution) evaluation datasets ===
 
 

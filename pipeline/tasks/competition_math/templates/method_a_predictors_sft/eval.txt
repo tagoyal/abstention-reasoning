@@ -1,0 +1,9 @@
+Imagine that you are given this math problem to solve.
+
+{problem}
+
+To help you to solve this problem, an expert may have provided a partial solution. If provided, assume that this partial solution is correct and build on it to solve the problem.
+
+Partial Solution: {hint_sequence}
+
+You need to predict whether you will be able to solve this problem given the partial solution. IMMEDIATELY output <answer>1</answer> if you can solve it, or <answer>0</answer> if you cannot. Output nothing else.

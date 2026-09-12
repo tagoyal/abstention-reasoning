@@ -120,6 +120,18 @@ def cmd_create_prompts(args):
     )
 
 
+def cmd_create_verification_data(args):
+    """Create binary predictor data from multi-sample solver aggregates."""
+    commands.create_verification_data(
+        task_name=args.task,
+        generations_path=Path(args.generations),
+        output_path=Path(args.output),
+        method_name=args.method,
+        num_samples=args.num_samples,
+        threshold=args.threshold,
+    )
+
+
 def cmd_create_ood_prompts(args):
     """Create OOD evaluation prompts."""
     output_path = Path(args.output) if args.output else None
@@ -405,6 +417,24 @@ def main():
              "creates every level for eval; other methods include the first N hints.")
     p.add_argument("--json", action="store_true", help="Force JSON output for all splits (instead of parquet for RL)")
     p.set_defaults(func=cmd_create_prompts)
+
+    # create_verification_data
+    p = subparsers.add_parser(
+        "create_verification_data",
+        help="Create binary predictor data from multi-sample solver aggregates",
+    )
+    p.add_argument("--task", required=True, help="Task name")
+    p.add_argument("--method", default="method_a",
+                   help="Predictor method/template (default: method_a)")
+    p.add_argument("--generations", required=True,
+                   help="Path to the multi-sample solver aggregate JSON")
+    p.add_argument("--output", required=True,
+                   help="Output path for the predictor SFT dataset")
+    p.add_argument("--num-samples", type=int, default=10,
+                   help="Required samples per source prompt (default: 10)")
+    p.add_argument("--threshold", type=float, default=0.5,
+                   help="Label 1 when pass_rate >= threshold (default: 0.5)")
+    p.set_defaults(func=cmd_create_verification_data)
 
     # create_ood_prompts
     ood_names = ", ".join(sorted(commands.OOD_DATASETS.keys()))

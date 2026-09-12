@@ -465,6 +465,19 @@ def drop_exhausted_records(records: list[dict]) -> tuple[list[dict], int]:
     return keep, len(records) - len(keep)
 
 
+def copy_source_fields(record: dict, prompt_data: dict) -> None:
+    """Preserve fields needed to derive later datasets from this generation."""
+    for key in (
+        "source_index",
+        "hint_level",
+        "hint_sequence",
+        "ground_truth",
+        "split",
+    ):
+        if key in prompt_data:
+            record[key] = prompt_data[key]
+
+
 def generate(
     task_name: str,
     model_name: str,
@@ -845,6 +858,7 @@ def generate(
                 if "total_token_count" in best_sample:
                     record["total_token_count"] = best_sample["total_token_count"]
 
+                copy_source_fields(record, prompt_data)
                 records_by_index[prompt_data["index"]] = record
 
             records = sorted(records_by_index.values(), key=lambda r: r["index"])
@@ -956,6 +970,7 @@ def generate(
                             "answer_truncated": best_sample.get("answer_truncated", False),
                         }
 
+                        copy_source_fields(record, prompt_data)
                         records_by_index[prompt_data["index"]] = record
 
                     records = sorted(records_by_index.values(), key=lambda r: r["index"])
@@ -1069,6 +1084,7 @@ def generate(
                 if "total_token_count" in best_sample:
                     record["total_token_count"] = best_sample["total_token_count"]
 
+                copy_source_fields(record, prompt_data)
                 records_by_index[prompt_data["index"]] = record
 
             records = sorted(records_by_index.values(), key=lambda r: r["index"])
@@ -1699,5 +1715,4 @@ def _format_basic_metrics(metrics: dict, model_name: str | None = None) -> str:
             lines.append(f"  {variant}: {correct}/{total} ({acc:.0%})")
 
     return "\n".join(lines)
-
 
