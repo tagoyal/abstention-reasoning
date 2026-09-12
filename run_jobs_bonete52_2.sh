@@ -14,4 +14,5 @@ python -m pipeline train_rl \
   --run-id qwen2.5-3b \
   --sft-model artifacts/countdown/models/method_ac_sft/qwen2.5-3b/model \
   --train-prompts artifacts/countdown/problems_with_format/rl_train__method_ac.parquet \
-  --val-prompts artifacts/countdown/problems_with_format/rl_val__method_ac.parquet
+  --val-prompts artifacts/countdown/problems_with_format/rl_val__method_ac.parquet \
+  --overwrite
