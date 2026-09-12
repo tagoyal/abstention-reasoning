@@ -14,4 +14,5 @@ python -m pipeline train_rl \
   --run-id qwen2.5-1.5b \
   --sft-model artifacts/competition_math/models/method_ac_sft/qwen2.5-1.5b/model \
   --train-prompts artifacts/competition_math/problems_with_format/rl_train__method_ac.parquet \
-  --val-prompts artifacts/competition_math/problems_with_format/rl_val__method_ac.parquet  --overwrite
+  --val-prompts artifacts/competition_math/problems_with_format/rl_val__method_ac.parquet \
+  --overwrite
