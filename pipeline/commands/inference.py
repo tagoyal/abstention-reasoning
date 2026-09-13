@@ -10,7 +10,7 @@ from pathlib import Path
 from pipeline.core.io import load_json, save_json
 from pipeline.core.generator import Generator, GenerationConfig, AsyncGenerator
 from pipeline.core.method import Method
-from pipeline.core.utils import model_short_name
+from pipeline.core.utils import extract_answer, model_short_name
 from pipeline.tasks import get_task
 
 
@@ -1581,6 +1581,7 @@ def evaluate(
             "error": meta.get("error"),
             **{k: v for k, v in meta.items() if k not in ("predicted_answer", "error")},
         }
+        copy_source_fields(detail, prompt_data)
 
         detail["truncation"] = classify_truncation(detail)
 
@@ -1641,6 +1642,299 @@ def evaluate(
     save_json(output_path, results)
     print(f"\nSaved results to {output_path}")
 
+    return output_path
+
+
+def _combine_verifier_eval_single(
+    task_name: str,
+    solver_results: dict,
+    verifier_results: dict,
+    solver_by_key: dict,
+    verifier_by_key: dict,
+    source_indices: list[int],
+    max_hints: int,
+    width: int,
+) -> list[dict]:
+    """Original single-sample logic: one decision trace per problem."""
+    final_details = []
+    for source_index in source_indices:
+        expected_solver = {
+            (source_index, hint_level) for hint_level in range(width)
+        }
+        missing_solver = sorted(expected_solver - solver_by_key.keys())
+        if missing_solver:
+            raise ValueError(
+                f"Source {source_index}: missing solver hint levels "
+                f"{[hint for _, hint in missing_solver]}"
+            )
+
+        trace = []
+        selected_level = max_hints
+        selected_verifier = None
+        for hint_level in range(max_hints):
+            key = (source_index, hint_level)
+            verifier_detail = verifier_by_key.get(key)
+            if verifier_detail is None:
+                raise ValueError(
+                    f"Source {source_index}: missing verifier result for "
+                    f"hint level {hint_level}"
+                )
+            answer = extract_answer(verifier_detail.get("generation", ""))
+            if answer not in {"0", "1"}:
+                raise ValueError(
+                    f"Source {source_index}, hint level {hint_level}: verifier "
+                    f"must output <answer>0</answer> or <answer>1</answer>, "
+                    f"got {verifier_detail.get('generation')!r}"
+                )
+            prediction = int(answer)
+            trace.append({
+                "hint_level": hint_level,
+                "generation": verifier_detail["generation"],
+                "prediction": prediction,
+            })
+            if prediction == 1:
+                selected_level = hint_level
+                selected_verifier = verifier_detail
+                break
+
+        selected_solver = solver_by_key[(source_index, selected_level)]
+        detail = {
+            **selected_solver,
+            "index": source_index,
+            "source_index": source_index,
+            "selected_candidate_index": selected_solver["index"],
+            "num_hints": selected_level,
+            "selected_hint_level": selected_level,
+            "verifier_generation": (
+                selected_verifier["generation"] if selected_verifier else None
+            ),
+            "verifier_prediction": 1 if selected_verifier else None,
+            "verifier_trace": trace,
+            "forced_at_max_hints": selected_level == max_hints,
+        }
+        final_details.append(detail)
+    return final_details
+
+
+def _combine_verifier_eval_multisample(
+    solver_by_key: dict,
+    verifier_by_key: dict,
+    source_indices: list[int],
+    max_hints: int,
+    width: int,
+) -> list[dict]:
+    """Multi-sample logic: run `num_samples` independent decision rollouts per
+    problem, using the same "same rollout index across hint levels" pairing.
+
+    Rollout t at hint level h draws the t-th verifier sample generated for
+    that (problem, hint_level) candidate. If it predicts 1 ("stop, answer
+    now"), the t-th solver sample at that hint level becomes the rollout's
+    final answer. If it predicts 0, the rollout moves to hint_level + 1 and
+    repeats with the t-th sample there. If no hint level says "stop" before
+    max_hints, the t-th solver sample at max_hints is used (forced answer).
+
+    This produces `num_samples` independent full decision traces per problem
+    (instead of just one), so downstream metrics can report variance across
+    repeated rollouts of the whole solver+verifier pipeline.
+    """
+    def sample_count(detail: dict) -> int:
+        samples = detail.get("samples")
+        if not isinstance(samples, list) or not samples:
+            raise ValueError(
+                f"Index {detail.get('index')}: expected multi-sample "
+                f"'samples' list, found none"
+            )
+        return len(samples)
+
+    final_details = []
+    for source_index in source_indices:
+        expected_solver = {
+            (source_index, hint_level) for hint_level in range(width)
+        }
+        missing_solver = sorted(expected_solver - solver_by_key.keys())
+        if missing_solver:
+            raise ValueError(
+                f"Source {source_index}: missing solver hint levels "
+                f"{[hint for _, hint in missing_solver]}"
+            )
+
+        # Every candidate at this source index must offer the same number of
+        # samples, so rollout index t is well-defined across all hint levels.
+        counts = set()
+        for hint_level in range(width):
+            counts.add(sample_count(solver_by_key[(source_index, hint_level)]))
+        for hint_level in range(max_hints):
+            counts.add(sample_count(verifier_by_key[(source_index, hint_level)]))
+        if len(counts) != 1:
+            raise ValueError(
+                f"Source {source_index}: inconsistent sample counts across "
+                f"candidates: {sorted(counts)}"
+            )
+        num_samples = counts.pop()
+
+        for t in range(num_samples):
+            trace = []
+            selected_level = max_hints
+            selected_verifier_sample = None
+            for hint_level in range(max_hints):
+                key = (source_index, hint_level)
+                verifier_detail = verifier_by_key.get(key)
+                if verifier_detail is None:
+                    raise ValueError(
+                        f"Source {source_index}: missing verifier result for "
+                        f"hint level {hint_level}"
+                    )
+                v_sample = verifier_detail["samples"][t]
+                answer = extract_answer(v_sample.get("generation", ""))
+                if answer not in {"0", "1"}:
+                    raise ValueError(
+                        f"Source {source_index}, hint level {hint_level}, "
+                        f"rollout {t}: verifier must output "
+                        f"<answer>0</answer> or <answer>1</answer>, got "
+                        f"{v_sample.get('generation')!r}"
+                    )
+                prediction = int(answer)
+                trace.append({
+                    "hint_level": hint_level,
+                    "generation": v_sample["generation"],
+                    "prediction": prediction,
+                })
+                if prediction == 1:
+                    selected_level = hint_level
+                    selected_verifier_sample = v_sample
+                    break
+
+            selected_solver_detail = solver_by_key[(source_index, selected_level)]
+            selected_solver_sample = selected_solver_detail["samples"][t]
+            detail = {
+                **selected_solver_sample,
+                "index": source_index,
+                "source_index": source_index,
+                "trial_index": t,
+                "variant": selected_solver_detail.get("variant", "unknown"),
+                "level": selected_solver_detail.get("level", "unknown"),
+                "ground_truth": selected_solver_detail.get("ground_truth"),
+                "selected_candidate_index": selected_solver_detail["index"],
+                "num_hints": selected_level,
+                "selected_hint_level": selected_level,
+                "verifier_generation": (
+                    selected_verifier_sample["generation"]
+                    if selected_verifier_sample else None
+                ),
+                "verifier_prediction": 1 if selected_verifier_sample else None,
+                "verifier_trace": trace,
+                "forced_at_max_hints": selected_level == max_hints,
+            }
+            final_details.append(detail)
+    return final_details
+
+
+def combine_verifier_eval(
+    task_name: str,
+    solver_results_path: Path,
+    verifier_results_path: Path,
+    output_path: Path,
+    max_hints: int = 5,
+) -> Path:
+    """Apply verifier decisions to fixed-hint solver results.
+
+    Supports both single-sample eval results (one generation per candidate)
+    and multi-sample eval results (`evaluate --num-samples N > 1`). In the
+    multi-sample case, each of the N samples is treated as an independent
+    rollout through the same stop/continue decision logic, producing N
+    independent final decisions per problem -- see
+    `_combine_verifier_eval_multisample` for details.
+    """
+    if max_hints < 1:
+        raise ValueError(f"max_hints must be positive, got {max_hints}")
+
+    solver_results = load_json(solver_results_path)
+    verifier_results = load_json(verifier_results_path)
+    solver_details = solver_results.get("details")
+    verifier_details = verifier_results.get("details")
+    if not isinstance(solver_details, list):
+        raise ValueError(f"{solver_results_path} has no details list")
+    if not isinstance(verifier_details, list):
+        raise ValueError(f"{verifier_results_path} has no details list")
+
+    width = max_hints + 1
+
+    def candidate_key(detail: dict) -> tuple[int, int]:
+        index = detail.get("index")
+        if not isinstance(index, int):
+            raise ValueError(f"Evaluation detail has invalid index: {index!r}")
+        source_index = detail.get("source_index", index // width)
+        hint_level = detail.get("hint_level", index % width)
+        if not isinstance(source_index, int) or not isinstance(hint_level, int):
+            raise ValueError(
+                f"Index {index}: invalid source_index/hint_level "
+                f"{source_index!r}/{hint_level!r}"
+            )
+        return source_index, hint_level
+
+    def index_candidates(details: list[dict], label: str) -> dict[tuple[int, int], dict]:
+        indexed = {}
+        for detail in details:
+            key = candidate_key(detail)
+            if key in indexed:
+                raise ValueError(f"Duplicate {label} result for {key}")
+            indexed[key] = detail
+        return indexed
+
+    solver_by_key = index_candidates(solver_details, "solver")
+    verifier_by_key = index_candidates(verifier_details, "verifier")
+    source_indices = sorted({source_index for source_index, _ in solver_by_key})
+
+    # Multi-sample eval results (`evaluate --num-samples N > 1`) store a
+    # "samples" list per candidate instead of a single "generation" -- detect
+    # that shape here and switch to the per-rollout combination logic.
+    any_solver_detail = next(iter(solver_by_key.values()), None)
+    any_verifier_detail = next(iter(verifier_by_key.values()), None)
+    solver_multisample = bool(any_solver_detail) and "samples" in any_solver_detail
+    verifier_multisample = bool(any_verifier_detail) and "samples" in any_verifier_detail
+    if solver_multisample != verifier_multisample:
+        raise ValueError(
+            "solver and verifier results must both be single-sample or both "
+            "multi-sample (one has a 'samples' list, the other doesn't)"
+        )
+
+    if solver_multisample:
+        final_details = _combine_verifier_eval_multisample(
+            solver_by_key, verifier_by_key, source_indices, max_hints, width,
+        )
+    else:
+        final_details = _combine_verifier_eval_single(
+            task_name, solver_results, verifier_results,
+            solver_by_key, verifier_by_key, source_indices, max_hints, width,
+        )
+
+    task = get_task(task_name)
+    metrics = task.compute_metrics(final_details)
+    metrics["truncation"] = count_truncation(final_details)
+    hint_metrics = compute_hint_metrics(final_details)
+    results = {
+        "model": solver_results.get("model"),
+        "model_alias": "method_a_pipeline",
+        "prompts": solver_results.get("prompts"),
+        "timestamp": datetime.now().isoformat(),
+        "config": {
+            "max_hints": max_hints,
+            "multisample": solver_multisample,
+            "solver": solver_results.get("config", {}),
+            "verifier": verifier_results.get("config", {}),
+            "solver_results": str(solver_results_path),
+            "verifier_results": str(verifier_results_path),
+        },
+        "metrics": metrics,
+        "details": final_details,
+        "hint_metrics": hint_metrics,
+    }
+
+    print(task.format_metrics(metrics, "method_a_pipeline"))
+    print(format_hint_metrics(hint_metrics, final_details))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    save_json(output_path, results)
+    print(f"\nSaved combined evaluation to {output_path}")
     return output_path
 
 
@@ -1715,4 +2009,3 @@ def _format_basic_metrics(metrics: dict, model_name: str | None = None) -> str:
             lines.append(f"  {variant}: {correct}/{total} ({acc:.0%})")
 
     return "\n".join(lines)
-

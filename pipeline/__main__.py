@@ -252,6 +252,17 @@ def cmd_evaluate(args):
     )
 
 
+def cmd_combine_verifier_eval(args):
+    """Combine verifier decisions with fixed-hint solver evaluations."""
+    commands.combine_verifier_eval(
+        task_name=args.task,
+        solver_results_path=Path(args.solver_results),
+        verifier_results_path=Path(args.verifier_results),
+        output_path=Path(args.output),
+        max_hints=args.max_hints,
+    )
+
+
 def cmd_analyze(args):
     """Analyze dataset accuracy by variant."""
     commands.analyze(
@@ -555,6 +566,22 @@ def main():
     p.add_argument("--seed", type=int, default=42, help="Random seed for generation (default: 42)")
     p.add_argument("--no-hints", action="store_true", help="Counterfactual eval: block hint requests during decoding so the model must answer alone")
     p.set_defaults(func=cmd_evaluate)
+
+    # combine_verifier_eval
+    p = subparsers.add_parser(
+        "combine_verifier_eval",
+        help="Apply verifier decisions to fixed-hint solver evaluation results",
+    )
+    p.add_argument("--task", required=True, help="Task name")
+    p.add_argument("--solver-results", required=True,
+                   help="Method AC evaluation over every fixed hint level")
+    p.add_argument("--verifier-results", required=True,
+                   help="Method A verifier evaluation over fixed hint levels")
+    p.add_argument("--output", required=True,
+                   help="Output path for the combined pipeline evaluation")
+    p.add_argument("--max-hints", type=int, default=5,
+                   help="Maximum hint level, selected unconditionally if needed")
+    p.set_defaults(func=cmd_combine_verifier_eval)
 
     # analyze
     p = subparsers.add_parser("analyze", help="Analyze dataset accuracy by variant (prints grid)")

@@ -245,13 +245,15 @@ def _create_prompts_single(
 
     # Determine format from output path
     fmt = "parquet" if str(output_path).endswith(".parquet") else "json"
-    is_method_ac = method is not None and method.name == "method_ac"
-    if is_method_ac and num_hints is None:
-        raise ValueError("method_ac requires --num-hints")
-    if is_method_ac and num_hints is not None and num_hints < 0:
+    uses_fixed_hint_levels = (
+        method is not None and method.name in {"method_ac", "method_a"}
+    )
+    if uses_fixed_hint_levels and num_hints is None:
+        raise ValueError(f"{method.name} requires --num-hints")
+    if uses_fixed_hint_levels and num_hints is not None and num_hints < 0:
         raise ValueError(f"num_hints must be non-negative, got {num_hints}")
-    if is_method_ac and num_hints == 0:
-        raise ValueError("method_ac requires --num-hints to be greater than 0")
+    if uses_fixed_hint_levels and num_hints == 0:
+        raise ValueError(f"{method.name} requires --num-hints to be greater than 0")
 
     # For RL splits (parquet), store primitives only - template applied at runtime
     # For other splits (json), apply template now
@@ -266,7 +268,7 @@ def _create_prompts_single(
 
         records = []
         for primitive in primitives:
-            if is_method_ac and num_hints is not None:
+            if uses_fixed_hint_levels and num_hints is not None:
                 hints_list = primitive.get("hint_exprs", [])
                 if not hints_list:
                     prefix_hints = primitive.get("prefix_hints", {})
@@ -293,7 +295,7 @@ def _create_prompts_single(
 
             ground_truth = task.get_ground_truth(primitive)
 
-            if not is_method_ac:
+            if not uses_fixed_hint_levels:
                 hint_levels = [None]
 
             for hint_level in hint_levels:
@@ -308,12 +310,12 @@ def _create_prompts_single(
                 )
                 record_index = (
                     primitive["index"] * (num_hints + 1) + hint_level
-                    if is_method_ac and split_name == "eval"
+                    if uses_fixed_hint_levels and split_name == "eval"
                     else primitive["index"]
                 )
                 record_primitive = (
                     {**enriched_primitive, "hint_sequence": hint_sequence}
-                    if is_method_ac
+                    if uses_fixed_hint_levels
                     else enriched_primitive
                 )
 
@@ -341,7 +343,7 @@ def _create_prompts_single(
                         "ground_truth": ground_truth,
                     },
                 }
-                if is_method_ac:
+                if uses_fixed_hint_levels:
                     record["source_index"] = primitive["index"]
                     record["hint_level"] = hint_level
                 records.append(record)
@@ -382,7 +384,7 @@ def _create_prompts_single(
                         key = f"hint_{i}"
                         if key in prefix_hints:
                             hints_list.append(prefix_hints[key])
-                if is_method_ac:
+                if uses_fixed_hint_levels:
                     max_hint_level = min(num_hints, len(hints_list))
                     if split_name == "eval":
                         hint_levels = range(max_hint_level + 1)
@@ -394,7 +396,7 @@ def _create_prompts_single(
                         ]
                 primitive = {**primitive, "hints": hints_list[:num_hints]}
 
-            if is_method_ac:
+            if uses_fixed_hint_levels:
                 ground_truth = task.get_ground_truth(primitive)
                 for hint_level in hint_levels:
                     hint_sequence = (
