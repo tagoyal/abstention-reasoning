@@ -98,6 +98,11 @@ class CountdownTask(BaseTask):
         3. Expression only uses available numbers
         4. Each number used at most once
         5. Expression evaluates to target
+
+        method_c's verifier ground truth carries a "correct" label (0/1)
+        instead of "numbers"/"target" -- the predicted <answer>0/1</answer>
+        tag is compared directly against that label rather than evaluated as
+        an expression.
         """
         # Count hint requests
         num_hints = generation.count("<request>")
@@ -108,6 +113,16 @@ class CountdownTask(BaseTask):
             return False, {
                 "predicted_answer": None,
                 "error": "no_answer_tag",
+                "num_hints": num_hints,
+            }
+
+        if "correct" in primitive and "numbers" not in primitive:
+            answer = answer.strip()
+            expected_label = primitive.get("correct")
+            is_correct = answer in ("0", "1") and int(answer) == int(expected_label)
+            return is_correct, {
+                "predicted_label": answer,
+                "expected_label": expected_label,
                 "num_hints": num_hints,
             }
 

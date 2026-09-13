@@ -1,0 +1,3 @@
+template_variant: method_c_predictors_rl
+reward_function: compute_score
+reward_kwargs: {}

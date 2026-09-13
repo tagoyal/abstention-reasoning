@@ -1,0 +1,9 @@
+Consider this math problem. To help solve this problem, an expert may have provided a partial solution. If provided, assume that this partial solution is correct.
+
+Problem: {problem}
+
+The following solution was generated for this problem:
+
+Solution: {solution}
+
+You need to verify whether this solution is correct. Think through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and output <answer>1</answer> if the solution is correct, or <answer>0</answer> if incorrect. Output no other text within the <answer> </answer> tags. 

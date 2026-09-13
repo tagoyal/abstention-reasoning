@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL="qwen2.5-4b"
+MODEL="qwen3-4b-base"
 TASK="competition_math"
 
 python -m pipeline generate \
@@ -11,7 +11,7 @@ python -m pipeline generate \
   --run-id "${MODEL}" \
   --split sft_train \
   --num-samples 10 \
-  --sample-strategy random_correct \
+  --sample-strategy random \
   --async \
   --output "artifacts/${TASK}/sft_datasets/sft_train__method_ac__verification-10s__${MODEL}.internal.json"
 
@@ -22,7 +22,7 @@ python -m pipeline generate \
   --run-id "${MODEL}" \
   --split sft_val \
   --num-samples 10 \
-  --sample-strategy random_correct \
+  --sample-strategy random \
   --async \
   --output "artifacts/${TASK}/sft_datasets/sft_val__method_ac__verification-10s__${MODEL}.internal.json"
 

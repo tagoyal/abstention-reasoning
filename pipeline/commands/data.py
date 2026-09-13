@@ -450,15 +450,139 @@ def _create_prompts_single(
     return output_path
 
 
+def _create_verification_data_method_c(
+    task_name: str,
+    generations_path: Path,
+    sft_fraction: float = 0.1,
+    seed: int = 42,
+    run_id: str | None = None,
+    split: str = "train",
+) -> Path:
+    """Build verifier prompts for method_c from single representative solves.
+
+    Unlike method_a, there is no aggregation across samples: each generation
+    record is one representative solve attempt (e.g. from
+    `generate --sample-strategy random_correct`), and the ground truth is
+    simply whether that attempt was correct (1) or not (0). A `sft_fraction`
+    slice of the records is written out as SFT prompts (to warm-start the
+    verifier); the rest is written as RL prompts. The actual verifier
+    judgment (the <think>/<answer> generation) is produced later by running
+    `pipeline generate` against these prompts.
+
+    `split` selects "train" (writes sft_train + rl_train, the default) or
+    "val" (writes sft_val + rl_val, e.g. for an RL --val-prompts set).
+
+    Output paths are derived automatically (same convention as `create_prompts`):
+    both files land in `problems_with_format/`, named
+    `sft_{split}__method_c__{run_id}.json` and `rl_{split}__method_c__{run_id}.parquet`
+    (run-id suffix omitted if not given).
+    """
+    if not 0 < sft_fraction < 1:
+        raise ValueError(f"sft_fraction must be in (0, 1), got {sft_fraction}")
+    if split not in ("train", "val"):
+        raise ValueError(f"split must be 'train' or 'val', got {split!r}")
+
+    method = Method.load("method_c", task_name)
+    output_path_sft = method.formatted_path(task_name, f"sft_{split}", desc=run_id)
+    output_path_rl = method.formatted_path(task_name, f"rl_{split}", desc=run_id)
+
+    task = get_task(task_name)
+    template = method.load_template(task_name, "sft")
+    generations = load_json(generations_path)
+    assistant_prefix = getattr(task, "assistant_prefix", None)
+
+    rng = random.Random(seed)
+    order = list(range(len(generations)))
+    rng.shuffle(order)
+    n_sft = max(1, int(len(order) * sft_fraction))
+    sft_positions = set(order[:n_sft])
+
+    sft_records = []
+    rl_records = []
+    n_correct = 0
+
+    for pos, source in enumerate(generations):
+        index = source.get("index")
+        ground_truth = source.get("ground_truth")
+        generation_text = source.get("generation")
+        is_correct = source.get("correct")
+        if not isinstance(ground_truth, dict):
+            raise ValueError(f"Index {index}: missing ground_truth")
+        if generation_text is None:
+            raise ValueError(f"Index {index}: missing generation")
+        if not isinstance(is_correct, bool):
+            raise ValueError(f"Index {index}: missing/invalid 'correct' flag")
+
+        label = int(is_correct)
+        n_correct += label
+        record_ground_truth = {"correct": label}
+
+        rendered_template = template.replace("{solution}", generation_text)
+        prompt = task.format_prompt(ground_truth, rendered_template, include_assistant_prefix=True)
+
+        if pos in sft_positions:
+            sft_records.append({
+                "index": index,
+                "run_id": run_id,
+                "prompt": prompt,
+                "ground_truth": record_ground_truth,
+                "variant": source.get("variant", "unknown"),
+                "split": f"sft_{split}",
+            })
+        else:
+            rl_records.append({
+                "index": index,
+                "run_id": run_id,
+                "primitive": {
+                    "problem": ground_truth.get("problem"),
+                    "solution": generation_text,
+                },
+                "ground_truth": record_ground_truth,
+                "variant": source.get("variant", "unknown"),
+                "split": f"rl_{split}",
+                "data_source": task_name,
+                "assistant_prefix": assistant_prefix,
+                "extra_info": {"index": index},
+                "reward_model": {"style": "rule", "ground_truth": record_ground_truth},
+            })
+
+    output_path_sft.parent.mkdir(parents=True, exist_ok=True)
+    save_json(output_path_sft, sft_records)
+    print(f"Saved {len(sft_records)} SFT verifier records to {output_path_sft}")
+
+    output_path_rl.parent.mkdir(parents=True, exist_ok=True)
+    save_parquet(output_path_rl, rl_records)
+    print(f"Saved {len(rl_records)} RL verifier records to {output_path_rl}")
+    print(f"Overall correct: {n_correct}/{len(generations)}")
+
+    return output_path_sft
+
+
 def create_verification_data(
     task_name: str,
     generations_path: Path,
-    output_path: Path,
+    output_path: Path | None = None,
     method_name: str = "method_a",
     num_samples: int = 10,
     threshold: float = 0.5,
+    sft_fraction: float = 0.1,
+    seed: int = 42,
+    run_id: str | None = None,
+    split: str = "train",
 ) -> Path:
     """Convert multi-sample solver aggregates into binary predictor SFT data."""
+    if method_name == "method_c":
+        return _create_verification_data_method_c(
+            task_name=task_name,
+            generations_path=generations_path,
+            sft_fraction=sft_fraction,
+            seed=seed,
+            run_id=run_id,
+            split=split,
+        )
+
+    if output_path is None:
+        raise ValueError("--output is required for method_name != 'method_c'")
     if num_samples < 1:
         raise ValueError(f"num_samples must be positive, got {num_samples}")
     if not 0 <= threshold <= 1:

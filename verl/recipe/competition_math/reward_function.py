@@ -254,6 +254,7 @@ def compute_score(
         Dict with score and metadata
     """
     correct_answer = ground_truth.get("answer", "")
+    verifier_label = ground_truth.get("correct") if "answer" not in ground_truth else None
     do_print = False
 
     if do_print:
@@ -302,8 +303,13 @@ def compute_score(
             "malformed": True,
         }
 
-    # Check correctness
-    is_correct = check_answer(predicted, correct_answer)
+    # Check correctness. method_c's verifier ground truth carries a "correct"
+    # label (0/1) instead of a math "answer" -- the predicted <answer>0/1</answer>
+    # tag is compared directly against that label rather than math-verified.
+    if verifier_label is not None:
+        is_correct = predicted.strip() in ("0", "1") and int(predicted.strip()) == int(verifier_label)
+    else:
+        is_correct = check_answer(predicted, correct_answer)
 
     if is_correct:
         if do_print:

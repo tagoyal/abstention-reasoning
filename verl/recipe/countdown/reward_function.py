@@ -165,8 +165,9 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
     """The scoring function for countdown
     """
     #format_score = 0
-    target = ground_truth['target']
-    numbers = ground_truth['numbers']
+    verifier_label = ground_truth.get("correct") if "target" not in ground_truth else None
+    target = ground_truth.get('target')
+    numbers = ground_truth.get('numbers')
 
     equation = extract_solution(solution_str=solution_str)
     do_print = False
@@ -196,6 +197,16 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
         if do_print:
             print(f"No equation found or length too short")
         return {"score": 0, "score_wo_hint_penalty": 0, "num_hints": num_hints, "abstained": False, "malformed": False, "correct": False}
+
+    # method_c's verifier ground truth carries a "correct" label (0/1) instead
+    # of "target"/"numbers" -- the predicted <answer>0/1</answer> tag is
+    # compared directly against that label rather than evaluated as an
+    # expression.
+    if verifier_label is not None:
+        predicted_label = equation.strip()
+        is_correct = predicted_label in ("0", "1") and int(predicted_label) == int(verifier_label)
+        final_score = score if is_correct else format_score
+        return {"score": final_score, "score_wo_hint_penalty": final_score, "num_hints": num_hints, "abstained": False, "malformed": False, "correct": is_correct}
 
     # Validate equation uses correct numbers
     if not validate_equation(equation, numbers):

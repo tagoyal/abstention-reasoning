@@ -125,10 +125,14 @@ def cmd_create_verification_data(args):
     commands.create_verification_data(
         task_name=args.task,
         generations_path=Path(args.generations),
-        output_path=Path(args.output),
+        output_path=Path(args.output) if args.output else None,
         method_name=args.method,
         num_samples=args.num_samples,
         threshold=args.threshold,
+        sft_fraction=args.sft_fraction,  # only relevant for method_c
+        seed=args.seed,  # only relevant for method_c
+        run_id=args.run_id,  # only relevant for method_c
+        split=args.split,  # only relevant for method_c
     )
 
 
@@ -439,12 +443,24 @@ def main():
                    help="Predictor method/template (default: method_a)")
     p.add_argument("--generations", required=True,
                    help="Path to the multi-sample solver aggregate JSON")
-    p.add_argument("--output", required=True,
-                   help="Output path for the predictor SFT dataset")
+    p.add_argument("--output",
+                   help="Output path for the predictor SFT dataset. Required for "
+                        "method_a; auto-derived under problems_with_format/ for method_c")
     p.add_argument("--num-samples", type=int, default=10,
                    help="Required samples per source prompt (default: 10)")
     p.add_argument("--threshold", type=float, default=0.5,
                    help="Label 1 when pass_rate >= threshold (default: 0.5)")
+    p.add_argument("--sft-fraction", type=float, default=0.1,
+                   help="method_c only: fraction of records held out as SFT prompts, "
+                        "rest go to RL (default: 0.1)")
+    p.add_argument("--seed", type=int, default=42,
+                   help="method_c only: seed for the SFT/RL split")
+    p.add_argument("--run-id",
+                   help="method_c only: run-id identifier used in output filenames and "
+                        "stored on each record")
+    p.add_argument("--split", default="train", choices=["train", "val"],
+                   help="method_c only: 'train' writes sft_train/rl_train, 'val' writes "
+                        "sft_val/rl_val (default: train)")
     p.set_defaults(func=cmd_create_verification_data)
 
     # create_ood_prompts
@@ -474,12 +490,15 @@ def main():
     p.add_argument("--top-p", type=float, default=0.9, help="Top-p")
     p.add_argument("--num-samples", type=int, default=1, help="Number of samples per prompt (best selected by --sample-strategy)")
     p.add_argument("--sample-strategy", default=None,
-        choices=["shortest_cot", "most_hints", "random_correct"],
+        choices=["shortest_cot", "most_hints", "random_correct", "random"],
         help="Selection strategy when --num-samples > 1 (default: most_hints for "
              "multi-turn, shortest_cot otherwise). 'random_correct' picks uniformly "
              "among correct samples and DROPS problems with no correct sample; the "
              "others fall back to an incorrect one, and the argmax strategies skew "
-             "the achieved distribution (most_hints inflates hint counts).")
+             "the achieved distribution (most_hints inflates hint counts). 'random' "
+             "picks uniformly among ALL samples regardless of correctness and never "
+             "drops a problem -- use when the representative sample's own "
+             "correctness is the signal you want preserved (e.g. method_c).")
     p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
     p.add_argument("--data-parallel-size", type=int, default=1,
         help="Independent model replicas; prompts are sharded across them. The cluster "

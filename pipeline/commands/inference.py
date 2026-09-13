@@ -381,12 +381,16 @@ def select_best_sample(
       argmax ones bias the result: "most_hints" keeps the hint-richest correct
       sample, which pushes the achieved hint distribution above the scheduled
       one. Random selection leaves the schedule's shape intact.
+    - "random": Pick uniformly at random among ALL samples, correct or not,
+      and never drop the problem. Use this when the representative sample's
+      own correctness is the signal you want to preserve (e.g. method_c's
+      verifier ground truth), rather than biasing toward a solved rollout.
 
     Args:
         samples: List of generation results with 'text', 'finish_reason', 'token_count'
         task: Task instance for checking correctness
         primitive: Primitive data with ground truth
-        strategy: Selection strategy ("shortest_cot", "most_hints", "random_correct")
+        strategy: Selection strategy ("shortest_cot", "most_hints", "random_correct", "random")
 
     Returns:
         Best sample dict with added 'correct' and 'metadata' fields
@@ -428,6 +432,11 @@ def select_best_sample(
             import random as _random
             rng = _random.Random(0)
         best_sample = rng.choice(correct_samples)
+    elif strategy == "random":
+        if rng is None:
+            import random as _random
+            rng = _random.Random(0)
+        best_sample = rng.choice(evaluated_samples)
     elif strategy == "most_hints":
         candidates = correct_samples if correct_samples else incorrect_samples
         best_sample = max(candidates, key=lambda s: s["_num_hints"])

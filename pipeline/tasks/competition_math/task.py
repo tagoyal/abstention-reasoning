@@ -245,6 +245,10 @@ class CompetitionMathTask(BaseTask):
 
         Uses math-verify for robust symbolic equivalence checking.
         Gold answers are parsed as LaTeX, predicted answers as plain expressions.
+
+        method_c's verifier ground truth carries a "correct" label (0/1)
+        instead of a math "answer" -- the predicted <answer>0/1</answer> tag
+        is compared directly against that label rather than math-verified.
         """
         # Standard format
         predicted = self.extract_answer(generation)
@@ -256,6 +260,15 @@ class CompetitionMathTask(BaseTask):
             }
 
         predicted = predicted.strip()
+
+        if "correct" in primitive and "answer" not in primitive:
+            expected_label = primitive.get("correct")
+            is_correct = predicted in ("0", "1") and int(predicted) == int(expected_label)
+            return is_correct, {
+                "predicted_label": predicted,
+                "expected_label": expected_label,
+            }
+
         correct_answer = primitive.get("answer", "")
 
         if correct_answer is None:
