@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODEL="qwen2.5-1.5b"
-TASK="competition_math"
+TASK="countdown"
 
 # Step 1: generate representative solver rollouts from method_ac. Already done
 # once per model for the method_a verifier runs -- reuse those files instead of
