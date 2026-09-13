@@ -70,8 +70,7 @@ python -m pipeline train_sft \
   --base-model "artifacts/${TASK}/models/method_ac_models/${MODEL}/model" \
   --dataset "artifacts/${TASK}/sft_datasets/sft_train__method_c__${MODEL}.json" \
   --output "artifacts/${TASK}/models/method_c_predictors_sft/${MODEL}/model" \
-  --completion-only-loss \
-  --overwrite
+  --completion-only-loss 
 
 # Step 5: RL-train the verifier on the remaining RL slice, validating against
 # the rl_val slice built in step 2.
