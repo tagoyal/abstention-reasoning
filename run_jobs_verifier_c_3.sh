@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL="qwen2.5-1.5b"
+MODEL="qwen3-4b-base"
 TASK="competition_math"
 
 # Step 1: generate representative solver rollouts from method_ac. Already done
