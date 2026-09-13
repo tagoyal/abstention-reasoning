@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MODEL="qwen2.5-3b"
-TASK="competition_math"
+TASK="countdown"
 
 python -m pipeline generate \
   --task "${TASK}" \
