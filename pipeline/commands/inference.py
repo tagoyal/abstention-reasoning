@@ -1498,6 +1498,27 @@ def evaluate(
               + (f"; {near_miss} wrote a request-shaped tag" if near_miss else "")
               + (f"; {fabricated} invented their own <response>" if fabricated else ""))
 
+    # method_a/method_c's output is just a <answer>0</answer>/<answer>1</answer>
+    # stop decision. When their prompts already carry a genuine binary label
+    # ({"correct": label}, no answer/numbers -- e.g. their own SFT/RL training
+    # prompts), task.check_correctness() takes a cheap shortcut that directly
+    # compares against that label, so leave it alone. But their eval-split
+    # prompts (built via create_prompts, which always calls
+    # task.get_ground_truth()) instead carry the *original puzzle's* ground
+    # truth -- there, check_correctness can't take that shortcut and instead
+    # falls through to full verification (sympy symbolic equality for math),
+    # which is slow and meaningless since downstream consumers
+    # (combine_verifier_eval) only read `generation`. Skip the check in that
+    # case, per-prompt, rather than trusting method_name alone.
+    def _is_binary_verifier_ground_truth(gt: dict) -> bool:
+        return "correct" in gt and "answer" not in gt and "numbers" not in gt
+
+    def _skip_correctness_check(pd: dict) -> bool:
+        return (
+            method_name in ("method_a", "method_c")
+            and not _is_binary_verifier_ground_truth(pd.get("ground_truth", {}))
+        )
+
     # --- Multi-sample path (num_samples > 1) ---
     if num_samples > 1:
         details = []
@@ -1507,10 +1528,14 @@ def evaluate(
                 **prompt_data["ground_truth"],
                 "variant": prompt_data.get("variant", "unknown"),
             }
+            skip_check = _skip_correctness_check(prompt_data)
 
             samples = []
             for s in gen_samples:
-                is_correct, meta = task.check_correctness(primitive, s["text"])
+                if skip_check:
+                    is_correct, meta = None, {"predicted_answer": extract_answer(s["text"])}
+                else:
+                    is_correct, meta = task.check_correctness(primitive, s["text"])
                 samples.append({
                     "generation": s["text"],
                     "correct": is_correct,
@@ -1521,7 +1546,7 @@ def evaluate(
 
             n_correct = sum(1 for s in samples if s["correct"])
 
-            details.append({
+            detail = {
                 "index": prompt_data["index"],
                 "variant": prompt_data.get("variant", "unknown"),
                 "level": prompt_data.get("ground_truth", {}).get("level", "unknown"),
@@ -1529,7 +1554,9 @@ def evaluate(
                 "n_samples": len(samples),
                 "n_correct": n_correct,
                 "samples": samples,
-            })
+            }
+            copy_source_fields(detail, prompt_data)
+            details.append(detail)
 
         # Compute multi-sample metrics
         metrics = _compute_multisample_metrics(details)
@@ -1571,7 +1598,10 @@ def evaluate(
             "variant": prompt_data.get("variant", "unknown"),
         }
 
-        is_correct, meta = task.check_correctness(primitive, gen_result["text"])
+        if _skip_correctness_check(prompt_data):
+            is_correct, meta = None, {"predicted_answer": extract_answer(gen_result["text"])}
+        else:
+            is_correct, meta = task.check_correctness(primitive, gen_result["text"])
         finish_reason = gen_result.get("finish_reason", "unknown")
         token_count = gen_result.get("token_count", 0)
 
@@ -1872,8 +1902,15 @@ def combine_verifier_eval(
         index = detail.get("index")
         if not isinstance(index, int):
             raise ValueError(f"Evaluation detail has invalid index: {index!r}")
-        source_index = detail.get("source_index", index // width)
-        hint_level = detail.get("hint_level", index % width)
+        source_index = detail.get("source_index")
+        hint_level = detail.get("hint_level")
+        if source_index is None or hint_level is None:
+            raise ValueError(
+                f"Index {index}: missing source_index/hint_level -- this "
+                f"evaluation file was produced before `evaluate` started "
+                f"recording those fields; re-run `evaluate` to regenerate it "
+                f"(inferring them from `index // width` is no longer supported)"
+            )
         if not isinstance(source_index, int) or not isinstance(hint_level, int):
             raise ValueError(
                 f"Index {index}: invalid source_index/hint_level "
