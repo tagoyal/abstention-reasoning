@@ -250,15 +250,30 @@ class Generator(_SamplingParams):
         """
 
         stop = DEFAULT_STOP_STRINGS
-        sampling_params = self._sampling_params(
-            temperature=self.config.temperature,
-            top_p=self.config.top_p,
-            max_tokens=self.config.max_new_tokens,
-            n=self.config.num_samples,
-            seed=self.config.seed,
-            stop=stop,
-            include_stop_str_in_output=True,
-        )
+        base_seed = self.config.seed
+        # One SamplingParams per prompt, each with its own seed offset --
+        # sharing a single SamplingParams object (and thus one fixed seed)
+        # across many different prompts makes every prompt draw the *same*
+        # position in a freshly-seeded RNG stream, which is highly correlated
+        # across prompts instead of independent. Usually invisible when
+        # num_samples/n is large per prompt (each request still advances its
+        # own RNG stream n times, diluting the shared first draw), but with
+        # n=1 it means literally every prompt's single sample comes from the
+        # same shared draw, which can badly skew any per-prompt binary
+        # decision (e.g. a verifier's accept/reject rate) away from the
+        # model's true distribution.
+        sampling_params = [
+            self._sampling_params(
+                temperature=self.config.temperature,
+                top_p=self.config.top_p,
+                max_tokens=self.config.max_new_tokens,
+                n=self.config.num_samples,
+                seed=(base_seed + idx) if base_seed is not None else None,
+                stop=stop,
+                include_stop_str_in_output=True,
+            )
+            for idx in range(len(prompts))
+        ]
 
         # Apply chat template
         tokenizer = self.model.get_tokenizer()
@@ -1051,17 +1066,24 @@ class AsyncGenerator(_SamplingParams):
 
         num_prompts = len(prompts)
 
-        # Sampling params
+        # Sampling params. One SamplingParams per prompt, each with its own
+        # seed offset -- see the matching comment in Generator.generate() for
+        # why sharing one fixed seed across many different prompt requests
+        # badly skews per-prompt binary decisions (e.g. a verifier's
+        # accept/reject rate) once num_samples/n is small (n=1 especially).
         stop = DEFAULT_STOP_STRINGS
-        sampling_params = self._sampling_params(
-            temperature=self.config.temperature,
-            top_p=self.config.top_p,
-            max_tokens=self.config.max_new_tokens,
-            n=num_samples,
-            seed=self.config.seed,
-            stop=stop,
-            include_stop_str_in_output=True,
-        )
+        base_seed = self.config.seed
+
+        def make_sampling_params(idx: int):
+            return self._sampling_params(
+                temperature=self.config.temperature,
+                top_p=self.config.top_p,
+                max_tokens=self.config.max_new_tokens,
+                n=num_samples,
+                seed=(base_seed + idx) if base_seed is not None else None,
+                stop=stop,
+                include_stop_str_in_output=True,
+            )
 
         # Results storage
         results = [None] * num_prompts
@@ -1070,6 +1092,7 @@ class AsyncGenerator(_SamplingParams):
             """Process a single prompt."""
             formatted = self._format_prompt(prompts[idx], tokenizer)
             request_id = f"req_{idx}_{uuid.uuid4().hex[:8]}"
+            sampling_params = make_sampling_params(idx)
 
             # Generate — collect all outputs (v1 engine streams one per sample)
             samples = []

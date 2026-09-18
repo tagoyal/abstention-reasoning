@@ -4,6 +4,7 @@ Inference commands - generation and evaluation.
 
 import random
 import re
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -1684,6 +1685,25 @@ def evaluate(
     return output_path
 
 
+def _effective_max_hints(
+    source_index: int, levels: set[int], global_max_hints: int,
+) -> int:
+    """Determine how many hint levels are actually usable for this problem.
+
+    Some problems have fewer available hint levels than `global_max_hints`
+    (e.g. shorter problems run out of hints sooner), so instead of requiring
+    every problem to provide solver results up to the global `max_hints`, we
+    walk the contiguous run of hint levels starting at 0 that this problem
+    actually has, capped at `global_max_hints`.
+    """
+    if 0 not in levels:
+        raise ValueError(f"Source {source_index}: missing solver hint level 0")
+    local_max_hints = 0
+    while local_max_hints < global_max_hints and (local_max_hints + 1) in levels:
+        local_max_hints += 1
+    return local_max_hints
+
+
 def _combine_verifier_eval_single(
     task_name: str,
     solver_results: dict,
@@ -1692,25 +1712,19 @@ def _combine_verifier_eval_single(
     verifier_by_key: dict,
     source_indices: list[int],
     max_hints: int,
-    width: int,
+    solver_levels_by_source: dict,
 ) -> list[dict]:
     """Original single-sample logic: one decision trace per problem."""
     final_details = []
     for source_index in source_indices:
-        expected_solver = {
-            (source_index, hint_level) for hint_level in range(width)
-        }
-        missing_solver = sorted(expected_solver - solver_by_key.keys())
-        if missing_solver:
-            raise ValueError(
-                f"Source {source_index}: missing solver hint levels "
-                f"{[hint for _, hint in missing_solver]}"
-            )
+        local_max_hints = _effective_max_hints(
+            source_index, solver_levels_by_source[source_index], max_hints,
+        )
 
         trace = []
-        selected_level = max_hints
+        selected_level = local_max_hints
         selected_verifier = None
-        for hint_level in range(max_hints):
+        for hint_level in range(local_max_hints):
             key = (source_index, hint_level)
             verifier_detail = verifier_by_key.get(key)
             if verifier_detail is None:
@@ -1749,7 +1763,7 @@ def _combine_verifier_eval_single(
             ),
             "verifier_prediction": 1 if selected_verifier else None,
             "verifier_trace": trace,
-            "forced_at_max_hints": selected_level == max_hints,
+            "forced_at_max_hints": selected_level == local_max_hints,
         }
         final_details.append(detail)
     return final_details
@@ -1760,7 +1774,7 @@ def _combine_verifier_eval_multisample(
     verifier_by_key: dict,
     source_indices: list[int],
     max_hints: int,
-    width: int,
+    solver_levels_by_source: dict,
 ) -> list[dict]:
     """Multi-sample logic: run `num_samples` independent decision rollouts per
     problem, using the same "same rollout index across hint levels" pairing.
@@ -1787,22 +1801,16 @@ def _combine_verifier_eval_multisample(
 
     final_details = []
     for source_index in source_indices:
-        expected_solver = {
-            (source_index, hint_level) for hint_level in range(width)
-        }
-        missing_solver = sorted(expected_solver - solver_by_key.keys())
-        if missing_solver:
-            raise ValueError(
-                f"Source {source_index}: missing solver hint levels "
-                f"{[hint for _, hint in missing_solver]}"
-            )
+        local_max_hints = _effective_max_hints(
+            source_index, solver_levels_by_source[source_index], max_hints,
+        )
 
         # Every candidate at this source index must offer the same number of
         # samples, so rollout index t is well-defined across all hint levels.
         counts = set()
-        for hint_level in range(width):
+        for hint_level in range(local_max_hints + 1):
             counts.add(sample_count(solver_by_key[(source_index, hint_level)]))
-        for hint_level in range(max_hints):
+        for hint_level in range(local_max_hints):
             counts.add(sample_count(verifier_by_key[(source_index, hint_level)]))
         if len(counts) != 1:
             raise ValueError(
@@ -1813,9 +1821,9 @@ def _combine_verifier_eval_multisample(
 
         for t in range(num_samples):
             trace = []
-            selected_level = max_hints
+            selected_level = local_max_hints
             selected_verifier_sample = None
-            for hint_level in range(max_hints):
+            for hint_level in range(local_max_hints):
                 key = (source_index, hint_level)
                 verifier_detail = verifier_by_key.get(key)
                 if verifier_detail is None:
@@ -1862,7 +1870,7 @@ def _combine_verifier_eval_multisample(
                 ),
                 "verifier_prediction": 1 if selected_verifier_sample else None,
                 "verifier_trace": trace,
-                "forced_at_max_hints": selected_level == max_hints,
+                "forced_at_max_hints": selected_level == local_max_hints,
             }
             final_details.append(detail)
     return final_details
@@ -1895,8 +1903,6 @@ def combine_verifier_eval(
         raise ValueError(f"{solver_results_path} has no details list")
     if not isinstance(verifier_details, list):
         raise ValueError(f"{verifier_results_path} has no details list")
-
-    width = max_hints + 1
 
     def candidate_key(detail: dict) -> tuple[int, int]:
         index = detail.get("index")
@@ -1931,6 +1937,15 @@ def combine_verifier_eval(
     verifier_by_key = index_candidates(verifier_details, "verifier")
     source_indices = sorted({source_index for source_index, _ in solver_by_key})
 
+    # Some problems have fewer usable hint levels than the global
+    # `max_hints` (e.g. shorter problems run out of hints sooner). Track
+    # which hint levels each problem actually has solver results for, so we
+    # can cap each problem's effective max_hints individually instead of
+    # requiring every problem to reach the global max_hints.
+    solver_levels_by_source: dict[int, set[int]] = defaultdict(set)
+    for source_index, hint_level in solver_by_key:
+        solver_levels_by_source[source_index].add(hint_level)
+
     # Multi-sample eval results (`evaluate --num-samples N > 1`) store a
     # "samples" list per candidate instead of a single "generation" -- detect
     # that shape here and switch to the per-rollout combination logic.
@@ -1946,12 +1961,14 @@ def combine_verifier_eval(
 
     if solver_multisample:
         final_details = _combine_verifier_eval_multisample(
-            solver_by_key, verifier_by_key, source_indices, max_hints, width,
+            solver_by_key, verifier_by_key, source_indices, max_hints,
+            solver_levels_by_source,
         )
     else:
         final_details = _combine_verifier_eval_single(
             task_name, solver_results, verifier_results,
-            solver_by_key, verifier_by_key, source_indices, max_hints, width,
+            solver_by_key, verifier_by_key, source_indices, max_hints,
+            solver_levels_by_source,
         )
 
     task = get_task(task_name)

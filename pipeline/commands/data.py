@@ -6,6 +6,13 @@ import inspect
 import random
 from pathlib import Path
 
+# method_ac / method_a: how many hint levels to sample per problem, and how
+# strongly to bias that sample toward the lower (less-hinted) levels. Weight
+# of level l is decay**l, so decay < 1 favors 0, 1, 2, ... over higher levels;
+# decay=1 would be uniform.
+HINT_LEVELS_PER_PROBLEM = 2
+HINT_LEVEL_DECAY = 0.5
+
 from pipeline.core.io import load_json, save_json, save_parquet
 from pipeline.core.method import TASKS_ROOT, Method, get_primitives_path, partition_path
 from pipeline.tasks import get_task
@@ -217,6 +224,56 @@ def create_prompts(
     )
 
 
+def _extract_hints_list(primitive: dict) -> list[str]:
+    """Hint text per level, from whichever field the task populates:
+    `hint_exprs` (list, e.g. countdown) or `prefix_hints` (dict `hint_1..hint_6`,
+    e.g. competition_math)."""
+    hints_list = primitive.get("hint_exprs", [])
+    if not hints_list:
+        prefix_hints = primitive.get("prefix_hints", {})
+        for i in range(1, 7):
+            key = f"hint_{i}"
+            if key in prefix_hints:
+                hints_list.append(prefix_hints[key])
+    return hints_list
+
+
+def _sample_hint_levels(
+    rng: random.Random,
+    max_hint_level: int,
+    k: int = HINT_LEVELS_PER_PROBLEM,
+    decay: float = HINT_LEVEL_DECAY,
+) -> list[int]:
+    """Sample up to `k` distinct levels from [0, max_hint_level], weighted so
+    lower levels (less hinted) are more likely than higher ones. Weighted
+    sampling without replacement: each draw removes its level from the pool
+    so the same level can't be picked twice."""
+    levels = list(range(max_hint_level + 1))
+    if len(levels) <= k:
+        return levels
+    pool = list(zip(levels, (decay**level for level in levels)))
+    chosen = []
+    for _ in range(k):
+        total = sum(weight for _, weight in pool)
+        r = rng.uniform(0, total)
+        upto = 0.0
+        for i, (level, weight) in enumerate(pool):
+            upto += weight
+            if upto >= r:
+                chosen.append(level)
+                pool.pop(i)
+                break
+    return chosen
+
+
+def _hint_sequence_for_level(hints_list: list[str], hint_level: int, task_name: str) -> str:
+    if hint_level == 0:
+        return "No partial solution"
+    if task_name == "competition_math":
+        return "\n".join(hints_list[:hint_level])
+    return hints_list[hint_level - 1]
+
+
 def _create_prompts_single(
     task,
     task_name: str,
@@ -255,64 +312,83 @@ def _create_prompts_single(
     if uses_fixed_hint_levels and num_hints == 0:
         raise ValueError(f"{method.name} requires --num-hints to be greater than 0")
 
-    # For RL splits (parquet), store primitives only - template applied at runtime
-    # For other splits (json), apply template now
-    if fmt == "parquet":
+    is_parquet = fmt == "parquet"
+
+    # Interaction class name for multi-turn methods, e.g. "hint" -> "countdown_hint".
+    # Only relevant to the parquet (runtime-templated) path.
+    interaction_name = None
+    if is_parquet and method is not None and method.multi_turn:
+        interaction_name = f"{task_name}_{method.name}"
+
+    template = None
+    template_path = None
+    if not is_parquet:
+        # Resolve template path. Splits share one template per family: every
+        # sft_* split renders sft.txt and both rl_* splits render rl.txt, so
+        # the family name is the split name up to its first underscore.
+        template_split = split_name.split("_")[0]
+        if template_variant:
+            template_path = TASKS_ROOT / task_name / "templates" / template_variant / f"{template_split}.txt"
+        else:
+            # Legacy fallback (no variant subdirectory)
+            template_path = TASKS_ROOT / task_name / "templates" / f"{template_split}.txt"
+
+        if not template_path.exists():
+            raise FileNotFoundError(
+                f"Template not found: {template_path}. "
+                f"Check that --method is correct."
+            )
+
+        with open(template_path, "r", encoding="utf-8") as f:
+            template = f.read()
+
+    if is_parquet:
         print(f"Creating {split_name} data for {len(primitives)} primitives (template applied at runtime)...")
-
-        # Interaction class name for multi-turn methods, e.g. "hint" -> "countdown_hint"
-        interaction_name = None
-        if method is not None and method.multi_turn:
-            interaction_name = f"{task_name}_{method.name}"
+        if interaction_name is not None:
             print(f"  Multi-turn enabled: interaction_name={interaction_name}")
+    else:
+        print(f"Creating {split_name} prompts for {len(primitives)} primitives (template: {template_path})...")
 
-        records = []
-        for primitive in primitives:
-            if uses_fixed_hint_levels and num_hints is not None:
-                hints_list = primitive.get("hint_exprs", [])
-                if not hints_list:
-                    prefix_hints = primitive.get("prefix_hints", {})
-                    for i in range(1, 7):
-                        key = f"hint_{i}"
-                        if key in prefix_hints:
-                            hints_list.append(prefix_hints[key])
+    records = []
+    for primitive in primitives:
+        hints_list = None
+        hint_levels = [None]
+        if num_hints is not None:
+            hints_list = _extract_hints_list(primitive)
+            if uses_fixed_hint_levels:
                 max_hint_level = min(num_hints, len(hints_list))
-                if split_name == "eval":
-                    hint_levels = range(max_hint_level + 1)
-                else:
-                    hint_levels = [
-                        random.Random(seed + primitive["index"]).randint(
-                            0, max_hint_level
-                        )
-                    ]
+                hint_levels = _sample_hint_levels(
+                    random.Random(seed + primitive["index"]), max_hint_level
+                )
+            if not is_parquet:
+                # json path renders `{hints}` (if the template uses it) from the raw list
+                primitive = {**primitive, "hints": hints_list[:num_hints]}
 
-            # Enrich primitive with derived fields if task supports it
-            # (verl's runtime template does simple substitution, so we pre-compute fields)
-            if hasattr(task, 'enrich_primitive_for_rl'):
+        # Enrich primitive with derived fields if task supports it (parquet only:
+        # verl's runtime template does simple substitution, so we pre-compute fields)
+        if is_parquet:
+            if hasattr(task, "enrich_primitive_for_rl"):
                 enriched_primitive = task.enrich_primitive_for_rl(primitive)
             else:
                 enriched_primitive = primitive
 
-            ground_truth = task.get_ground_truth(primitive)
+        ground_truth = task.get_ground_truth(primitive)
 
-            if not uses_fixed_hint_levels:
-                hint_levels = [None]
+        for i, hint_level in enumerate(hint_levels):
+            hint_sequence = (
+                _hint_sequence_for_level(hints_list, hint_level, task_name)
+                if hint_level is not None
+                else None
+            )
+            # Every sampled hint level for a primitive needs a distinct record
+            # index; non-fixed-hint methods emit exactly one record per primitive.
+            record_index = (
+                primitive["index"] * HINT_LEVELS_PER_PROBLEM + i
+                if uses_fixed_hint_levels
+                else primitive["index"]
+            )
 
-            for hint_level in hint_levels:
-                hint_sequence = (
-                    "No partial solution"
-                    if hint_level == 0
-                    else "\n".join(hints_list[:hint_level])
-                    if task_name == "competition_math"
-                    else hints_list[hint_level - 1]
-                    if hint_level is not None
-                    else None
-                )
-                record_index = (
-                    primitive["index"] * (num_hints + 1) + hint_level
-                    if uses_fixed_hint_levels and split_name == "eval"
-                    else primitive["index"]
-                )
+            if is_parquet:
                 record_primitive = (
                     {**enriched_primitive, "hint_sequence": hint_sequence}
                     if uses_fixed_hint_levels
@@ -343,101 +419,31 @@ def _create_prompts_single(
                         "ground_truth": ground_truth,
                     },
                 }
+            else:
+                prompt_template = (
+                    template.replace("{hint_sequence}", hint_sequence)
+                    if uses_fixed_hint_levels
+                    else template
+                )
+                prompt = task.format_prompt(primitive, prompt_template, include_assistant_prefix)
+                record = {
+                    "index": record_index,
+                    "prompt": prompt,
+                    "ground_truth": ground_truth,
+                    "variant": primitive.get("variant", "unknown"),
+                    "split": split_name,
+                }
                 if uses_fixed_hint_levels:
-                    record["source_index"] = primitive["index"]
-                    record["hint_level"] = hint_level
-                records.append(record)
-
-        # Print reminder for verl config
-        if assistant_prefix:
-            print(f"  Note: Set verl config data.runtime_assistant_prefix=\"{assistant_prefix}\"")
-    else:
-        # Resolve template path. Splits share one template per family: every
-        # sft_* split renders sft.txt and both rl_* splits render rl.txt, so
-        # the family name is the split name up to its first underscore.
-        template_split = split_name.split("_")[0]
-        if template_variant:
-            template_path = TASKS_ROOT / task_name / "templates" / template_variant / f"{template_split}.txt"
-        else:
-            # Legacy fallback (no variant subdirectory)
-            template_path = TASKS_ROOT / task_name / "templates" / f"{template_split}.txt"
-
-        if not template_path.exists():
-            raise FileNotFoundError(
-                f"Template not found: {template_path}. "
-                f"Check that --method is correct."
-            )
-
-        with open(template_path, "r", encoding="utf-8") as f:
-            template = f.read()
-
-        print(f"Creating {split_name} prompts for {len(primitives)} primitives (template: {template_path})...")
-        records = []
-        for primitive in primitives:
-            # Inject hints if --num-hints is specified
-            # Supports both hint_exprs (list, countdown) and prefix_hints (dict, competition_math)
-            if num_hints is not None:
-                hints_list = primitive.get("hint_exprs", [])
-                if not hints_list:
-                    prefix_hints = primitive.get("prefix_hints", {})
-                    for i in range(1, 7):
-                        key = f"hint_{i}"
-                        if key in prefix_hints:
-                            hints_list.append(prefix_hints[key])
-                if uses_fixed_hint_levels:
-                    max_hint_level = min(num_hints, len(hints_list))
-                    if split_name == "eval":
-                        hint_levels = range(max_hint_level + 1)
-                    else:
-                        hint_levels = [
-                            random.Random(seed + primitive["index"]).randint(
-                                0, max_hint_level
-                            )
-                        ]
-                primitive = {**primitive, "hints": hints_list[:num_hints]}
+                    record["hint_sequence"] = hint_sequence
 
             if uses_fixed_hint_levels:
-                ground_truth = task.get_ground_truth(primitive)
-                for hint_level in hint_levels:
-                    hint_sequence = (
-                        "No partial solution"
-                        if hint_level == 0
-                        else "\n".join(hints_list[:hint_level])
-                        if task_name == "competition_math"
-                        else hints_list[hint_level - 1]
-                    )
-                    prompt = task.format_prompt(
-                        primitive,
-                        template.replace("{hint_sequence}", hint_sequence),
-                        include_assistant_prefix,
-                    )
-                    record = {
-                        "index": (
-                            primitive["index"] * (num_hints + 1) + hint_level
-                            if split_name == "eval"
-                            else primitive["index"]
-                        ),
-                        "source_index": primitive["index"],
-                        "hint_level": hint_level,
-                        "hint_sequence": hint_sequence,
-                        "prompt": prompt,
-                        "ground_truth": ground_truth,
-                        "variant": primitive.get("variant", "unknown"),
-                        "split": split_name,
-                    }
-                    records.append(record)
-                continue
-
-            prompt = task.format_prompt(primitive, template, include_assistant_prefix)
-            ground_truth = task.get_ground_truth(primitive)
-            record = {
-                "index": primitive["index"],
-                "prompt": prompt,
-                "ground_truth": ground_truth,
-                "variant": primitive.get("variant", "unknown"),
-                "split": split_name,
-            }
+                record["source_index"] = primitive["index"]
+                record["hint_level"] = hint_level
             records.append(record)
+
+    # Print reminder for verl config
+    if is_parquet and assistant_prefix:
+        print(f"  Note: Set verl config data.runtime_assistant_prefix=\"{assistant_prefix}\"")
 
     # Save
     output_path.parent.mkdir(parents=True, exist_ok=True)
