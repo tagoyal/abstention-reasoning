@@ -11,7 +11,7 @@ from pathlib import Path
 # of level l is decay**l, so decay < 1 favors 0, 1, 2, ... over higher levels;
 # decay=1 would be uniform.
 HINT_LEVELS_PER_PROBLEM = 2
-HINT_LEVEL_DECAY = 0.5
+HINT_LEVEL_DECAY = 0.7
 
 from pipeline.core.io import load_json, save_json, save_parquet
 from pipeline.core.method import TASKS_ROOT, Method, get_primitives_path, partition_path
