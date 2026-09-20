@@ -10,7 +10,7 @@ python -m pipeline generate \
   --task "${TASK}" \
   --method method_ac \
   --model rl \
-  --run-id "${MODEL}" \
+  --run-id "${RUN_ID}" \
   --split sft_train \
   --num-samples 10 \
   --sample-strategy random \
@@ -21,7 +21,7 @@ python -m pipeline generate \
   --task "${TASK}" \
   --method method_ac \
   --model rl \
-  --run-id "${MODEL}" \
+  --run-id "${RUN_ID}" \
   --split sft_val \
   --num-samples 10 \
   --sample-strategy random \
