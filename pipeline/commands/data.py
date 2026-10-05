@@ -238,9 +238,9 @@ def _extract_hints_list(primitive: dict) -> list[str]:
     """Hint text per level, from whichever field the task populates:
     `hint_exprs` (list, e.g. countdown) or `prefix_hints` (dict `hint_1..hint_6`,
     e.g. math)."""
-    hints_list = primitive.get("hint_exprs", [])
+    hints_list = primitive.get("hint_exprs") or []
     if not hints_list:
-        prefix_hints = primitive.get("prefix_hints", {})
+        prefix_hints = primitive.get("prefix_hints") or {}
         for i in range(1, 7):
             key = f"hint_{i}"
             if key in prefix_hints:
