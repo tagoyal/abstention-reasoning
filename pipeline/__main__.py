@@ -130,7 +130,7 @@ def cmd_create_verification_data(args):
     """Create binary predictor data from multi-sample solver aggregates."""
     commands.create_verification_data(
         task_name=args.task,
-        generations_path=Path(args.generations),
+        generations_path=Path(args.generations) if args.generations else None,
         output_path=Path(args.output) if args.output else None,
         method_name=args.method,
         num_samples=args.num_samples,
@@ -140,6 +140,21 @@ def cmd_create_verification_data(args):
         run_id=args.run_id,  # only relevant for method_c
         split=args.split,  # only relevant for method_c
         data_name=args.data_name,
+        models_name=args.models_name,
+        run_solver=args.run_solver,
+        solver_method_name=args.solver_method,
+        solver_run_id=args.solver_run_id,
+        solver_split=args.solver_split,
+        solver_output_path=Path(args.solver_output) if args.solver_output else None,
+        solver_batch_size=args.solver_batch_size,
+        solver_max_new_tokens=args.solver_max_new_tokens,
+        solver_temperature=args.solver_temperature,
+        solver_top_p=args.solver_top_p,
+        solver_tensor_parallel_size=args.solver_tensor_parallel_size,
+        solver_data_parallel_size=args.solver_data_parallel_size,
+        solver_gpu_memory_utilization=args.solver_gpu_memory_utilization,
+        solver_use_async=args.solver_async,
+        solver_seed=args.solver_seed,
     )
 
 
@@ -463,8 +478,9 @@ def main():
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--method", default="method_a",
                    help="Predictor method/template (default: method_a)")
-    p.add_argument("--generations", required=True,
-                   help="Path to the multi-sample solver aggregate JSON")
+    p.add_argument("--generations",
+                   help="Path to the multi-sample solver aggregate JSON. Required "
+                        "unless --run-solver is set, which generates it instead.")
     p.add_argument("--output",
                    help="Output path for the predictor SFT dataset. Required for "
                         "method_a; auto-derived under problems_with_format/ for method_c")
@@ -484,6 +500,34 @@ def main():
                    help="method_c only: 'train' writes sft_train/rl_train, 'val' writes "
                         "sft_val/rl_val (default: train)")
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
+    p.add_argument("--models-name", help="Models directory name (default: data-name)")
+    p.add_argument("--run-solver", action="store_true",
+                   help="Produce the multi-sample aggregate here instead of reading it "
+                        "from --generations: runs `evaluate --model rl --method "
+                        "<solver-method> --num-samples <num-samples>` first (keeping "
+                        "every raw sample and its correctness), then builds the "
+                        "verifier data from its output.")
+    p.add_argument("--solver-method", default="method_ac",
+                   help="Solver method whose RL model produces the aggregate "
+                        "(default: method_ac). Only used with --run-solver.")
+    p.add_argument("--solver-run-id",
+                   help="Run identifier for the solver's RL model. Only used with --run-solver.")
+    p.add_argument("--solver-split", default="sft_val",
+                   help="Which prompt split the solver is evaluated on (default: sft_val). "
+                        "Only used with --run-solver.")
+    p.add_argument("--solver-output",
+                   help="Output path for the solver's evaluate() results JSON (default: "
+                        "auto-derived under the rl model's evals/ directory, same "
+                        "convention as `pipeline evaluate`). Only used with --run-solver.")
+    p.add_argument("--solver-batch-size", type=int, default=16, help="Only used with --run-solver.")
+    p.add_argument("--solver-max-new-tokens", type=int, default=2048, help="Only used with --run-solver.")
+    p.add_argument("--solver-temperature", type=float, default=0.7, help="Only used with --run-solver.")
+    p.add_argument("--solver-top-p", type=float, default=0.9, help="Only used with --run-solver.")
+    p.add_argument("--solver-tensor-parallel-size", type=int, default=1, help="Only used with --run-solver.")
+    p.add_argument("--solver-data-parallel-size", type=int, default=1, help="Only used with --run-solver.")
+    p.add_argument("--solver-gpu-memory-utilization", type=float, default=0.9, help="Only used with --run-solver.")
+    p.add_argument("--solver-async", action="store_true", help="Use async generation for the solver. Only used with --run-solver.")
+    p.add_argument("--solver-seed", type=int, default=42, help="Only used with --run-solver.")
     p.set_defaults(func=cmd_create_verification_data)
 
     # create_ood_prompts

@@ -14,7 +14,7 @@ HINT_LEVELS_PER_PROBLEM = 2
 HINT_LEVEL_DECAY = 0.7
 
 from pipeline.core.io import load_json, save_json, save_parquet
-from pipeline.core.method import TASKS_ROOT, Method, get_primitives_path, partition_path, resolve_data_name
+from pipeline.core.method import TASKS_ROOT, Method, get_primitives_path, partition_path, resolve_data_name, resolve_models_name
 from pipeline.tasks import get_task
 
 
@@ -103,7 +103,20 @@ def create_partitions(
     primitives = load_json(primitives_path)
 
     written = {}
+    extra_splits = set(getattr(task, "EXTRA_SPLITS", ()))
     for split in task.supported_splits():
+        if split in extra_splits:
+            # Not a derivable [start, end) ratio range (e.g. rl_gen_train /
+            # rl_ver_train are a stratified resample of rl_train produced by
+            # scripts/split_dataset.py) -- create_partitions can't recompute
+            # these, so skip and leave whatever partition file already exists.
+            path = (output_dir / f"{split}.json") if output_dir else partition_path(data_name, split)
+            if path.exists():
+                print(f"  {split:<10} (pre-built partition, skipping) -> {path}")
+                written[split] = path
+            else:
+                print(f"  {split:<10} skipped: no SPLITS ratio and no partition file at {path}")
+            continue
         indices = set(task.get_split_indices(len(primitives), split, seed, primitives))
         rows = [p for p in primitives if p["index"] in indices]
         path = (output_dir / f"{split}.json") if output_dir else partition_path(data_name, split)
@@ -479,14 +492,21 @@ def _create_verification_data_method_c(
 ) -> Path:
     """Build verifier prompts for method_c from single representative solves.
 
-    Unlike method_a, there is no aggregation across samples: each generation
-    record is one representative solve attempt (e.g. from
-    `generate --sample-strategy random_correct`), and the ground truth is
-    simply whether that attempt was correct (1) or not (0). A `sft_fraction`
-    slice of the records is written out as SFT prompts (to warm-start the
-    verifier); the rest is written as RL prompts. The actual verifier
-    judgment (the <think>/<answer> generation) is produced later by running
-    `pipeline generate` against these prompts.
+    Unlike method_a, there is no aggregation across samples: each training
+    example is one representative solve attempt, and the ground truth is
+    simply whether that attempt was correct (1) or not (0). The input can be
+    either shape `generations_path` points at:
+      - an `evaluate --num-samples N` results file (e.g. from
+        `create_verification_data --run-solver`): one representative sample
+        is drawn at random per problem (seeded per-index, so reruns are
+        stable), preserving that sample's own correctness as the label --
+        this is "random" selection, not the solver's pass-rate.
+      - the older flat list from `generate --sample-strategy random_correct`:
+        each record already is the single representative solve.
+    A `sft_fraction` slice of the resulting records is written out as SFT
+    prompts (to warm-start the verifier); the rest is written as RL prompts.
+    The actual verifier judgment (the <think>/<answer> generation) is
+    produced later by running `pipeline generate` against these prompts.
 
     `split` selects "train" (writes sft_train + rl_train, the default) or
     "val" (writes sft_val + rl_val, e.g. for an RL --val-prompts set).
@@ -509,6 +529,8 @@ def _create_verification_data_method_c(
     task = get_task(task_name)
     template = method.load_template(task_name, "sft")
     generations = load_json(generations_path)
+    if isinstance(generations, dict) and "details" in generations:
+        generations = generations["details"]
     assistant_prefix = getattr(task, "assistant_prefix", None)
 
     rng = random.Random(seed)
@@ -524,8 +546,19 @@ def _create_verification_data_method_c(
     for pos, source in enumerate(generations):
         index = source.get("index")
         ground_truth = source.get("ground_truth")
-        generation_text = source.get("generation")
-        is_correct = source.get("correct")
+        raw_samples = source.get("samples")
+        if raw_samples is not None:
+            # evaluate()-style multi-sample aggregate: draw one representative
+            # sample per problem instead of expecting it pre-selected. Seeded
+            # per-index (not the shared `rng` above, which drives the SFT/RL
+            # split) so the pick is stable across reruns regardless of
+            # problem order.
+            chosen = random.Random(seed + index).choice(raw_samples)
+            generation_text = chosen.get("generation")
+            is_correct = chosen.get("correct")
+        else:
+            generation_text = source.get("generation")
+            is_correct = source.get("correct")
         if not isinstance(ground_truth, dict):
             raise ValueError(f"Index {index}: missing ground_truth")
         if generation_text is None:
@@ -578,31 +611,19 @@ def _create_verification_data_method_c(
     return output_path_sft
 
 
-def create_verification_data(
+def _create_verification_data_method_a(
     task_name: str,
     generations_path: Path,
-    output_path: Path | None = None,
-    method_name: str = "method_a",
-    num_samples: int = 10,
-    threshold: float = 0.5,
-    sft_fraction: float = 0.1,
-    seed: int = 42,
-    run_id: str | None = None,
-    split: str = "train",
-    data_name: str | None = None,
+    output_path: Path | None,
+    method_name: str,
+    num_samples: int,
+    threshold: float,
 ) -> Path:
-    """Convert multi-sample solver aggregates into binary predictor SFT data."""
-    if method_name == "method_c":
-        return _create_verification_data_method_c(
-            task_name=task_name,
-            generations_path=generations_path,
-            sft_fraction=sft_fraction,
-            seed=seed,
-            run_id=run_id,
-            split=split,
-            data_name=data_name,
-        )
+    """Build predictor SFT data from a multi-sample solver aggregate.
 
+    Each record's label is a pass-rate threshold: 1 if the solver answered
+    correctly in at least `threshold` of its `num_samples` rollouts, else 0.
+    """
     if output_path is None:
         raise ValueError("--output is required for method_name != 'method_c'")
     if num_samples < 1:
@@ -614,13 +635,22 @@ def create_verification_data(
     method = Method.load(method_name, task_name)
     template = method.load_template(task_name, "sft")
     generations = load_json(generations_path)
+    # `evaluate --num-samples N` (the --run-solver path) writes a results dict
+    # with a "details" list, one entry per problem, each carrying every raw
+    # sample and its own correctness under "samples"/"n_samples"/"n_correct".
+    # A flat list is the older `generate`-produced aggregate (one best sample
+    # per problem, no raw per-sample record) -- still accepted for anyone
+    # pointing --generations at a file built that way.
+    if isinstance(generations, dict) and "details" in generations:
+        generations = generations["details"]
 
     records = []
     positives = 0
     for source in generations:
         index = source.get("index")
-        actual_samples = source.get("num_samples")
-        correct_samples = source.get("num_correct_samples")
+        actual_samples = source.get("num_samples", source.get("n_samples"))
+        correct_samples = source.get("num_correct_samples", source.get("n_correct"))
+        raw_samples = source.get("samples")  # per-sample generation + correctness, when available
 
         if actual_samples != num_samples:
             raise ValueError(
@@ -637,7 +667,7 @@ def create_verification_data(
 
         pass_rate = correct_samples / actual_samples
         recorded_pass_rate = source.get("pass_rate")
-        if (
+        if recorded_pass_rate is not None and (
             not isinstance(recorded_pass_rate, (int, float))
             or abs(float(recorded_pass_rate) - pass_rate) > 1e-12
         ):
@@ -661,7 +691,7 @@ def create_verification_data(
         )
         label = int(pass_rate >= threshold)
         positives += label
-        records.append({
+        record = {
             "index": index,
             "source_index": source.get("source_index", index),
             "hint_level": source.get("hint_level"),
@@ -677,7 +707,13 @@ def create_verification_data(
             "num_samples": actual_samples,
             "variant": source.get("variant", "unknown"),
             "split": source.get("split"),
-        })
+        }
+        if raw_samples is not None:
+            # Keeps the label auditable against the rollouts it was computed
+            # from: each entry is one of the solver's N samples with its own
+            # generation text and correctness flag.
+            record["solver_samples"] = raw_samples
+        records.append(record)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_json(output_path, records)
@@ -686,6 +722,126 @@ def create_verification_data(
         f"(label 1: {positives}, label 0: {len(records) - positives})"
     )
     return output_path
+
+
+def create_verification_data(
+    task_name: str,
+    generations_path: Path | None = None,
+    output_path: Path | None = None,
+    method_name: str = "method_a",
+    num_samples: int = 10,
+    threshold: float = 0.5,
+    sft_fraction: float = 0.1,
+    seed: int = 42,
+    run_id: str | None = None,
+    split: str = "train",
+    data_name: str | None = None,
+    models_name: str | None = None,
+    run_solver: bool = False,
+    solver_method_name: str = "method_ac",
+    solver_run_id: str | None = None,
+    solver_split: str = "sft_val",
+    solver_output_path: Path | None = None,
+    solver_batch_size: int = 16,
+    solver_max_new_tokens: int = 2048,
+    solver_temperature: float = 0.7,
+    solver_top_p: float = 0.9,
+    solver_tensor_parallel_size: int = 1,
+    solver_data_parallel_size: int = 1,
+    solver_gpu_memory_utilization: float = 0.9,
+    solver_use_async: bool = False,
+    solver_seed: int = 42,
+) -> Path:
+    """Convert multi-sample solver aggregates into binary predictor SFT data.
+
+    When `run_solver` is set, the multi-sample solver aggregate isn't read
+    from disk -- it's produced first by evaluating `num_samples` rollouts per
+    prompt with the solver's RL model (equivalent to `pipeline evaluate
+    --model rl --method {solver_method_name} --run-id {solver_run_id}
+    --split {solver_split} --num-samples {num_samples}`), and that output
+    feeds straight into the label-building logic below. `evaluate` (unlike
+    `generate`) keeps every one of the N raw samples and its individual
+    correctness rather than collapsing to one representative sample, which is
+    exactly the per-sample signal the predictor's pass-rate label is built
+    from -- and those raw samples are carried into the output records here too,
+    so the label stays auditable against the rollouts that produced it.
+    """
+    if run_solver:
+        if generations_path is not None:
+            raise ValueError(
+                "--generations is not allowed together with --run-solver -- "
+                "the solver's own output becomes the generations file."
+            )
+        from pipeline.commands.inference import evaluate as run_evaluate
+        from pipeline.commands.inference import resolve_eval_output_path
+
+        resolved_data_name = resolve_data_name(task_name, data_name)
+        resolved_models_name = resolve_models_name(resolved_data_name, models_name)
+        solver_method = Method.load(solver_method_name, task_name)
+        if solver_output_path is None:
+            solver_output_path = resolve_eval_output_path(
+                solver_method, "rl", resolved_models_name, solver_run_id,
+                solver_split, num_samples,
+            )
+
+        if solver_output_path.exists():
+            # Same solver config (method/run-id/split/num-samples) as an
+            # earlier call -- e.g. method_a built this already and method_c
+            # is reusing it -- so there's nothing new to generate.
+            print(f"Reusing existing solver eval at {solver_output_path}; "
+                  f"skipping re-run.")
+            generations_path = solver_output_path
+        else:
+            print(
+                f"Running solver ({solver_method_name} rl model, run_id="
+                f"{solver_run_id}) for {num_samples} samples/prompt on split "
+                f"'{solver_split}'..."
+            )
+            generations_path = run_evaluate(
+                task_name=task_name,
+                model_name="rl",
+                method_name=solver_method_name,
+                run_id=solver_run_id,
+                split=solver_split,
+                output_path=solver_output_path,
+                num_samples=num_samples,
+                batch_size=solver_batch_size,
+                max_new_tokens=solver_max_new_tokens,
+                temperature=solver_temperature,
+                top_p=solver_top_p,
+                tensor_parallel_size=solver_tensor_parallel_size,
+                data_parallel_size=solver_data_parallel_size,
+                gpu_memory_utilization=solver_gpu_memory_utilization,
+                use_async=solver_use_async,
+                seed=solver_seed,
+                data_name=data_name,
+                models_name=models_name,
+            )
+            print(f"Solver eval written to {generations_path}; building verifier data...")
+    elif generations_path is None:
+        raise ValueError("--generations is required unless --run-solver is set")
+
+    if method_name == "method_c":
+        return _create_verification_data_method_c(
+            task_name=task_name,
+            generations_path=generations_path,
+            sft_fraction=sft_fraction,
+            seed=seed,
+            run_id=run_id,
+            split=split,
+            data_name=data_name,
+        )
+    elif method_name == "method_a":
+        return _create_verification_data_method_a(
+            task_name=task_name,
+            generations_path=generations_path,
+            output_path=output_path,
+            method_name=method_name,
+            num_samples=num_samples,
+            threshold=threshold,
+        )
+    else:
+        raise ValueError(f"Unsupported method_name: {method_name!r}")
 
 
 # === OOD (Out-of-Distribution) evaluation datasets ===

@@ -758,12 +758,17 @@ def train_rl(
         print("Note: --save-best needs room for the best and the final checkpoint; using --max-ckpt-to-keep 2")
         max_ckpt_to_keep = 2
 
-    # Default paths from method
+    # Default paths from method. method_ac trains on the "gen" half of
+    # rl_train/rl_val (scripts/split_dataset.py's stratified subdivision) so
+    # the "ver" half stays unseen by the solver's RL run, for later use by
+    # create_verification_data's --run-solver step.
     if method is not None:
+        train_split = "rl_gen_train" if method.name == "method_ac" else "rl_train"
+        val_split = "rl_gen_val" if method.name == "method_ac" else "rl_val"
         if train_prompts_path is None:
-            train_prompts_path = method.formatted_path(data_name, "rl_train")
+            train_prompts_path = method.formatted_path(data_name, train_split)
         if val_prompts_path is None:
-            candidate = method.formatted_path(data_name, "rl_val")
+            candidate = method.formatted_path(data_name, val_split)
             if candidate.exists():
                 val_prompts_path = candidate
 

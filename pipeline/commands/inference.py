@@ -1336,6 +1336,35 @@ def _format_multisample_metrics(metrics: dict, model_name: str | None, num_sampl
     return "\n".join(lines)
 
 
+def resolve_eval_output_path(
+    method,
+    model_name: str,
+    models_name: str,
+    run_id: str | None,
+    split: str,
+    num_samples: int = 1,
+    no_hints: bool = False,
+) -> Path:
+    """Default `evaluate()` output path: inside the run that produced the results.
+
+    The run directory already carries the model identity, so the filename
+    only records the split plus any deviation from the default eval settings
+    (multi-sample, counterfactual no-hints). Exposed separately so callers
+    (e.g. `create_verification_data --run-solver`) can check whether a given
+    eval already exists on disk before paying to regenerate it.
+    """
+    samples_suffix = f"_{num_samples}s" if num_samples > 1 else ""
+    hint_suffix = "_nohint" if no_hints else ""
+    suffix = f"{samples_suffix}{hint_suffix}"
+    if model_name in ("sft", "rl"):
+        return method.eval_path(models_name, model_name, run_id, split, suffix)
+    # A checkpoint evaluated outside any run of ours -- a stock HuggingFace
+    # model, or a path handed in directly. It has no run directory, so it
+    # gets one under _stock keyed by the model name.
+    slug = model_short_name(model_name)
+    return method.models_dir(models_name) / "_stock" / slug / "evals" / f"{split}{suffix}.json"
+
+
 def evaluate(
     task_name: str,
     model_name: str,
@@ -1420,21 +1449,9 @@ def evaluate(
                 "Either --method or --output must be specified. "
                 "Use --method to auto-derive paths, or --output for explicit paths."
             )
-        # Results live inside the run that produced them, so the run directory
-        # already carries the model identity and the filename only records the
-        # split plus any deviation from the default eval settings.
-        samples_suffix = f"_{num_samples}s" if num_samples > 1 else ""
-        hint_suffix = "_nohint" if no_hints else ""
-        suffix = f"{samples_suffix}{hint_suffix}"
-        if model_name in ("sft", "rl"):
-            output_path = method.eval_path(models_name, model_name, run_id, split, suffix)
-        else:
-            # A checkpoint evaluated outside any run of ours -- a stock
-            # HuggingFace model, or a path handed in directly. It has no run
-            # directory, so it gets one under _stock keyed by the model name.
-            slug = model_short_name(model_name)
-            output_path = (method.models_dir(models_name) / "_stock" / slug
-                           / "evals" / f"{split}{suffix}.json")
+        output_path = resolve_eval_output_path(
+            method, model_name, models_name, run_id, split, num_samples, no_hints,
+        )
 
     # Load prompts
     prompts_data = load_json(prompts_path)

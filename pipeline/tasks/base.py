@@ -68,10 +68,25 @@ class BaseTask:
         "eval": (0.7, 1.0),
     }
 
+    # rl_train/rl_val further subdivided into a "gen" half (used to run
+    # solver generation) and a "ver" half (used to train/evaluate the
+    # verifier), via scripts/split_dataset.py's stratified sampling. That
+    # split isn't a contiguous [start, end) ratio range over the shuffled
+    # primitive order -- it's a distribution-preserving resample within
+    # rl_train/rl_val -- so these have no SPLITS entry and get_split_indices()
+    # cannot (re)derive them. They only exist as partition files already
+    # written to disk; create_prompts reads those directly.
+    EXTRA_SPLITS: tuple[str, ...] = (
+        "rl_gen_train",
+        "rl_gen_val",
+        "rl_ver_train",
+        "rl_ver_val",
+    )
+
     @classmethod
     def supported_splits(cls) -> list[str]:
         """Split names this task defines, in creation order."""
-        return list(cls.SPLITS)
+        return list(cls.SPLITS) + list(cls.EXTRA_SPLITS)
 
     def get_split_indices(
         self,
