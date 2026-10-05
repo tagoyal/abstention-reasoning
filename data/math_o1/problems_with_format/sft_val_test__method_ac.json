@@ -1,0 +1,86 @@
+[
+  {
+    "index": 15624,
+    "prompt": [
+      {
+        "role": "system",
+        "content": "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer."
+      },
+      {
+        "role": "user",
+        "content": "Solve this math problem.\n\nLet $z$ be a complex number such that\n\\[z^2 + |z|^2 = 3 - 5i.\\]Find $|z|^2.$\n\nThink through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and IMMEDIATELY provide your final answer in <answer> </answer> tags with no text in between.\n\nTo help you to solve this problem, an expert may have provided a partial solution. If provided, assume that this partial solution is correct and build on it to solve the problem.\n\nPartial Solution: Write $z=a+bi$, where $a,b\\in\\mathbb{R}$, and use $z^2=a^2-b^2+2abi$ and $|z|^2=a^2+b^2$.\nSubstitute these expressions into the equation and simplify to obtain $2a^2+2abi=3-5i$.\nEquate real and imaginary parts to get $2a^2=3$ and $2ab=-5$."
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nLet me work through this problem step by step."
+      }
+    ],
+    "ground_truth": {
+      "level": "Level 4",
+      "variant": "Intermediate Algebra",
+      "problem": "Let $z$ be a complex number such that\n\\[z^2 + |z|^2 = 3 - 5i.\\]Find $|z|^2.$",
+      "answer": "\\frac{17}{3}",
+      "hint_exprs": [
+        "Write $z=a+bi$, where $a,b\\in\\mathbb{R}$, and use $z^2=a^2-b^2+2abi$ and $|z|^2=a^2+b^2$.",
+        "Substitute these expressions into the equation and simplify to obtain $2a^2+2abi=3-5i$.",
+        "Equate real and imaginary parts to get $2a^2=3$ and $2ab=-5$.",
+        "Use $a^2=\\frac{3}{2}$ and $b=-\\frac{5}{2a}$ to find $b^2=\\frac{25}{4a^2}=\\frac{25}{6}$.",
+        "Now use $|z|^2=a^2+b^2=\\frac{3}{2}+\\frac{25}{6}$ and compute the sum."
+      ],
+      "prefix_hints": {
+        "hint_1": "Write $z=a+bi$, where $a,b\\in\\mathbb{R}$, and use $z^2=a^2-b^2+2abi$ and $|z|^2=a^2+b^2$.",
+        "hint_2": "Substitute these expressions into the equation and simplify to obtain $2a^2+2abi=3-5i$.",
+        "hint_3": "Equate real and imaginary parts to get $2a^2=3$ and $2ab=-5$.",
+        "hint_4": "Use $a^2=\\frac{3}{2}$ and $b=-\\frac{5}{2a}$ to find $b^2=\\frac{25}{4a^2}=\\frac{25}{6}$.",
+        "hint_5": "Now use $|z|^2=a^2+b^2=\\frac{3}{2}+\\frac{25}{6}$ and compute the sum."
+      }
+    },
+    "variant": "Intermediate Algebra",
+    "split": "sft_val",
+    "hint_sequence": "Write $z=a+bi$, where $a,b\\in\\mathbb{R}$, and use $z^2=a^2-b^2+2abi$ and $|z|^2=a^2+b^2$.\nSubstitute these expressions into the equation and simplify to obtain $2a^2+2abi=3-5i$.\nEquate real and imaginary parts to get $2a^2=3$ and $2ab=-5$.",
+    "source_index": 7812,
+    "hint_level": 3
+  },
+  {
+    "index": 15625,
+    "prompt": [
+      {
+        "role": "system",
+        "content": "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer."
+      },
+      {
+        "role": "user",
+        "content": "Solve this math problem.\n\nLet $z$ be a complex number such that\n\\[z^2 + |z|^2 = 3 - 5i.\\]Find $|z|^2.$\n\nThink through this step by step in <think> </think> tags. When you are finished thinking, close with </think> and IMMEDIATELY provide your final answer in <answer> </answer> tags with no text in between.\n\nTo help you to solve this problem, an expert may have provided a partial solution. If provided, assume that this partial solution is correct and build on it to solve the problem.\n\nPartial Solution: Write $z=a+bi$, where $a,b\\in\\mathbb{R}$, and use $z^2=a^2-b^2+2abi$ and $|z|^2=a^2+b^2$."
+      },
+      {
+        "role": "assistant",
+        "content": "<think>\nLet me work through this problem step by step."
+      }
+    ],
+    "ground_truth": {
+      "level": "Level 4",
+      "variant": "Intermediate Algebra",
+      "problem": "Let $z$ be a complex number such that\n\\[z^2 + |z|^2 = 3 - 5i.\\]Find $|z|^2.$",
+      "answer": "\\frac{17}{3}",
+      "hint_exprs": [
+        "Write $z=a+bi$, where $a,b\\in\\mathbb{R}$, and use $z^2=a^2-b^2+2abi$ and $|z|^2=a^2+b^2$.",
+        "Substitute these expressions into the equation and simplify to obtain $2a^2+2abi=3-5i$.",
+        "Equate real and imaginary parts to get $2a^2=3$ and $2ab=-5$.",
+        "Use $a^2=\\frac{3}{2}$ and $b=-\\frac{5}{2a}$ to find $b^2=\\frac{25}{4a^2}=\\frac{25}{6}$.",
+        "Now use $|z|^2=a^2+b^2=\\frac{3}{2}+\\frac{25}{6}$ and compute the sum."
+      ],
+      "prefix_hints": {
+        "hint_1": "Write $z=a+bi$, where $a,b\\in\\mathbb{R}$, and use $z^2=a^2-b^2+2abi$ and $|z|^2=a^2+b^2$.",
+        "hint_2": "Substitute these expressions into the equation and simplify to obtain $2a^2+2abi=3-5i$.",
+        "hint_3": "Equate real and imaginary parts to get $2a^2=3$ and $2ab=-5$.",
+        "hint_4": "Use $a^2=\\frac{3}{2}$ and $b=-\\frac{5}{2a}$ to find $b^2=\\frac{25}{4a^2}=\\frac{25}{6}$.",
+        "hint_5": "Now use $|z|^2=a^2+b^2=\\frac{3}{2}+\\frac{25}{6}$ and compute the sum."
+      }
+    },
+    "variant": "Intermediate Algebra",
+    "split": "sft_val",
+    "hint_sequence": "Write $z=a+bi$, where $a,b\\in\\mathbb{R}$, and use $z^2=a^2-b^2+2abi$ and $|z|^2=a^2+b^2$.",
+    "source_index": 7812,
+    "hint_level": 1
+  }
+]

@@ -93,7 +93,18 @@ class MathTask(BaseTask):
         return messages
 
     def _verify_answer(self, predicted: str, correct_answer: str) -> bool:
-        """Verify predicted answer against correct answer using math-verify."""
+        """Verify predicted answer against correct answer using math-verify.
+
+        parsing_timeout=None / timeout_seconds=None disable math-verify's
+        default signal.alarm()-based timeout. That mechanism only works in a
+        process's main thread; check_correctness runs inside a
+        ThreadPoolExecutor (see select_best_sample's executor), where
+        signal.alarm() raises instead of timing out. Left at the default, every
+        parse/verify call here raises, is swallowed by the except Exception
+        blocks below, and is_correct silently stays False for every sample --
+        this previously caused 0% correctness for math specifically, since
+        countdown/sql don't go through math-verify.
+        """
         from math_verify import parse, verify, LatexExtractionConfig, ExprExtractionConfig
 
         # Parse gold (LaTeX from dataset) and predicted (plain symbolic from model)
@@ -101,6 +112,7 @@ class MathTask(BaseTask):
             gold_parsed = parse(
                 f"${correct_answer}$",
                 extraction_config=[LatexExtractionConfig()],
+                parsing_timeout=None,
             )
         except Exception:
             gold_parsed = []
@@ -109,6 +121,7 @@ class MathTask(BaseTask):
             pred_parsed = parse(
                 f"${predicted}$",
                 extraction_config=[LatexExtractionConfig(), ExprExtractionConfig()],
+                parsing_timeout=None,
             )
         except Exception:
             pred_parsed = []
@@ -117,7 +130,7 @@ class MathTask(BaseTask):
         is_correct = False
         if gold_parsed and pred_parsed:
             try:
-                is_correct = verify(gold_parsed, pred_parsed)
+                is_correct = verify(gold_parsed, pred_parsed, timeout_seconds=None)
             except Exception:
                 pass
 
@@ -127,13 +140,15 @@ class MathTask(BaseTask):
                 gold_plain = parse(
                     correct_answer,
                     extraction_config=[ExprExtractionConfig()],
+                    parsing_timeout=None,
                 )
                 pred_plain = parse(
                     predicted,
                     extraction_config=[ExprExtractionConfig()],
+                    parsing_timeout=None,
                 )
                 if gold_plain and pred_plain:
-                    is_correct = verify(gold_plain, pred_plain)
+                    is_correct = verify(gold_plain, pred_plain, timeout_seconds=None)
             except Exception:
                 pass
 

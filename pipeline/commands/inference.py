@@ -70,6 +70,29 @@ def count_truncation(records: list[dict]) -> dict[str, int]:
     return {"think": kinds.count("think"), "answer": kinds.count("answer")}
 
 
+def log_token_length_stats(all_results: list[list[dict]], max_new_tokens: int) -> None:
+    """Print a token-length summary over every raw sample in a generation batch.
+
+    Runs on the unfiltered samples (before correctness-based selection/dropping),
+    so the distribution -- and in particular how many samples hit the
+    --max-new-tokens cap -- stays visible even when every sample for every
+    prompt ends up discarded (e.g. --sample-strategy random_correct finding no
+    correct sample anywhere, which otherwise produces an empty dataset with no
+    other signal of why).
+    """
+    counts = [s["token_count"] for samples in all_results for s in samples]
+    if not counts:
+        return
+    hit_cap = sum(1 for c in counts if c >= max_new_tokens)
+    counts_sorted = sorted(counts)
+    n = len(counts_sorted)
+    mean = sum(counts_sorted) / n
+    median = counts_sorted[n // 2]
+    print(f"Token lengths over {n} samples: min={counts_sorted[0]}, "
+          f"median={median}, mean={mean:.0f}, max={counts_sorted[-1]}, "
+          f"hit --max-new-tokens cap ({max_new_tokens})={hit_cap} ({100*hit_cap/n:.1f}%)")
+
+
 def compute_hint_metrics(details: list[dict]) -> dict:
     """
     Compute hint usage metrics for multi-turn evaluation.
@@ -980,6 +1003,7 @@ def generate(
                     all_prompts = [p["prompt"] for p in current_prompts]
                     print(f"Running async generation on {len(all_prompts)} prompts...")
                     all_results = await async_generator.generate_async(all_prompts, num_samples=num_samples)
+                    log_token_length_stats(all_results, max_new_tokens)
 
                     from tqdm.auto import tqdm
                     for prompt_data, gen_samples in tqdm(
@@ -1035,6 +1059,11 @@ def generate(
 
                     records = sorted(records_by_index.values(), key=lambda r: r["index"])
                     save_json(output_path, records)
+
+                    if not records:
+                        print(f"No records remain after filtering (n_no_correct={n_no_correct}).")
+                        print(f"Saved dataset to {output_path}")
+                        break
 
                     correct = sum(1 for r in records if r["correct"])
                     truncated_count = sum(1 for r in records if r.get("finish_reason") == "length")

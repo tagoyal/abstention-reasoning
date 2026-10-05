@@ -1,14 +1,14 @@
 # python -m pipeline generate --task sql --method baseline --async \
 #     --model Qwen/Qwen3-32B --split sft_train \
-#     --data-name sql_conceptual --num-samples 10 \
+#     --data-name sql_partial_sql --num-samples 10 \
 #   --sample-strategy random 
 
 # python -m pipeline generate --task sql --method baseline --async \
 #     --model Qwen/Qwen3-32B --split sft_val \
-#     --data-name sql_conceptual --num-samples 10 \
+#     --data-name sql_partial_sql --num-samples 10 \
 #   --sample-strategy random
 
-for TASK in countdown math sql; do
+for TASK in math; do
   DATA_NAME="$TASK"
   if [ "$TASK" = "sql" ]; then
     DATA_NAME="sql_conceptual"
