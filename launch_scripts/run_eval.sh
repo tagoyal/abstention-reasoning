@@ -20,3 +20,17 @@ python -m pipeline evaluate \
   --model rl \
   --async \
   --num-samples 10
+
+for SPLIT in sft_train sft_val; do
+  python -m pipeline generate_tree \
+    --task "${TASK}" \
+    --method baseline \
+    --run-id "${RUN_ID}" \
+    --data-name "${DATA_NAME}" \
+    --model rl \
+    --split "${SPLIT}" \
+    --num-midpoints 2 \
+    --num-samples 10 \
+    --async
+done
+
