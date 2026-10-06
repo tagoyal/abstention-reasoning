@@ -2,8 +2,10 @@
 Data commands - primitives and prompts creation.
 """
 
+import gc
 import inspect
 import random
+import time
 from pathlib import Path
 
 # method_ac / method_a: how many hint levels to sample per problem, and how
@@ -844,6 +846,48 @@ def create_verification_data(
         raise ValueError(f"Unsupported method_name: {method_name!r}")
 
 
+# generate_tree reloads the vLLM engine once per `evaluate` call (root +
+# each midpoint/leaf step), and a just-finished engine's GPU memory isn't
+# always released before the next one tries to initialize -- a transient
+# teardown/startup race, not a real OOM. Retry a few times with a backoff
+# delay (plus a GC/cache clear) before giving up, rather than failing the
+# whole job on what's usually a few seconds of timing noise.
+_ENGINE_RACE_MARKERS = (
+    "Engine core initialization failed",
+    "Free memory on device",
+    "is less than desired GPU memory utilization",
+)
+_ENGINE_RACE_MAX_RETRIES = 4
+_ENGINE_RACE_RETRY_DELAY_SECONDS = 30
+
+
+def _evaluate_with_retry(evaluate_fn, **kwargs):
+    """Call `evaluate_fn(**kwargs)`, retrying on the transient vLLM engine
+    init race described above. Any other exception is raised immediately."""
+    for attempt in range(1, _ENGINE_RACE_MAX_RETRIES + 1):
+        try:
+            return evaluate_fn(**kwargs)
+        except Exception as exc:
+            is_race = any(marker in str(exc) for marker in _ENGINE_RACE_MARKERS)
+            if not is_race or attempt == _ENGINE_RACE_MAX_RETRIES:
+                raise
+            delay = _ENGINE_RACE_RETRY_DELAY_SECONDS * attempt
+            print(
+                f"[generate_tree] evaluate() hit a transient engine init race "
+                f"(attempt {attempt}/{_ENGINE_RACE_MAX_RETRIES}): {exc}\n"
+                f"Retrying in {delay}s..."
+            )
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except ImportError:
+                pass
+            gc.collect()
+            time.sleep(delay)
+
+
 def generate_tree(
     task_name: str,
     model_name: str,
@@ -1030,7 +1074,8 @@ def generate_tree(
         depth_eval_path = method.scratch_path(
             data_name, split, desc="tree_root_eval" if is_root else f"tree_depth{i}_eval"
         )
-        results_path = evaluate(
+        results_path = _evaluate_with_retry(
+            evaluate,
             task_name=task_name,
             model_name=model_name,
             method_name=method_name,

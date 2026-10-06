@@ -12,14 +12,14 @@ MODEL="$2"
 DATA_NAME="$3"
 RUN_ID="${MODEL}"
 
-python -m pipeline evaluate \
-  --task "${TASK}" \
-  --method baseline \
-  --run-id "${RUN_ID}" \
-  --data-name "${DATA_NAME}" \
-  --model rl \
-  --async \
-  --num-samples 10
+# python -m pipeline evaluate \
+#   --task "${TASK}" \
+#   --method baseline \
+#   --run-id "${RUN_ID}" \
+#   --data-name "${DATA_NAME}" \
+#   --model rl \
+#   --async \
+#   --num-samples 10
 
 for SPLIT in sft_train sft_val; do
   python -m pipeline generate_tree \
