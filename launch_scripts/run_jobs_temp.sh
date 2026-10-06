@@ -22,6 +22,7 @@ for RUN_ID in "${RUN_IDS[@]}"; do
     --data-name "${DATA_NAME}" \
     --output "models/${DATA_NAME}/baseline_classifier/${RUN_ID}_b/model" \
     --use-lora \
+    --balance-train \
     --epochs 3 \
     --max-length 2048 \
     --depth-eval-max-new-tokens 1
