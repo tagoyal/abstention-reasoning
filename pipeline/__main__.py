@@ -12,6 +12,7 @@ Commands:
     create_ood_prompts          Create eval prompts from an OOD math benchmark
     generate                    Run model on prompts to create dataset
     train_sft                   Train SFT model on generated dataset
+    train_classifier            Train verifier/abstain classifier on generate_tree output
     train_rl                    Train RL model using verl (GRPO)
     convert_checkpoint          Convert FSDP/Megatron checkpoint to HuggingFace format
     evaluate                    Evaluate model and compute metrics
@@ -358,6 +359,43 @@ def cmd_train_sft(args):
         strip_think_tokens=getattr(args, "strip_think_tokens", False),
         max_correct=args.max_correct,
         completion_only_loss=args.completion_only_loss,
+        data_name=args.data_name,
+        models_name=args.models_name,
+    )
+
+
+def cmd_train_classifier(args):
+    """Train verifier/abstain classifier on generate_tree output."""
+    dataset_path = Path(args.dataset) if args.dataset else None
+    eval_dataset_path = Path(args.eval_dataset) if args.eval_dataset else None
+    output_path = Path(args.output) if args.output else None
+
+    commands.train_classifier(
+        task_name=args.task,
+        base_model=args.base_model,
+        method_name=args.method,
+        run_id=getattr(args, "run_id", None),
+        dataset_path=dataset_path,
+        eval_dataset_path=eval_dataset_path,
+        output_path=output_path,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        learning_rate=args.learning_rate,
+        warmup_ratio=args.warmup_ratio,
+        max_length=args.max_length,
+        bf16=not args.no_bf16,
+        report_to=args.report_to,
+        project_name=args.project_name,
+        experiment_name=args.experiment_name,
+        completion_only_loss=args.completion_only_loss,
+        use_lora=args.use_lora,
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        lora_target_modules=args.lora_target_modules,
+        depth_eval_batch_size=args.depth_eval_batch_size,
+        depth_eval_max_new_tokens=args.depth_eval_max_new_tokens,
         data_name=args.data_name,
         models_name=args.models_name,
     )
@@ -772,6 +810,44 @@ def main():
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.add_argument("--models-name", help="Models directory name under models/ (default: data-name)")
     p.set_defaults(func=cmd_train_sft)
+
+    # train_classifier
+    p = subparsers.add_parser("train_classifier", help="Train verifier/abstain classifier on generate_tree output")
+    p.add_argument("--task", required=True, help="Task name")
+    p.add_argument("--base-model", required=True, help="Base model to fine-tune")
+    p.add_argument("--method", help="Method name for auto-derived paths")
+    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_classifier/. Required with --method; nothing is derived from the base checkpoint.")
+    p.add_argument("--dataset", help="Path to generate_tree output (default: auto-detect from method)")
+    p.add_argument("--eval-dataset", help="Path to held-out tree dataset for validation loss")
+    p.add_argument("--output", help="Output path (default: models/{models_name}/{method}_classifier/{run_id}/model)")
+    p.add_argument("--epochs", type=int, default=3, help="Number of training epochs")
+    p.add_argument("--batch-size", type=int, default=4, help="Per-device batch size")
+    p.add_argument("--gradient-accumulation-steps", type=int, default=4, help="Gradient accumulation steps")
+    p.add_argument("--learning-rate", type=float, default=1e-5, help="Learning rate")
+    p.add_argument("--warmup-ratio", type=float, default=0.1, help="Warmup ratio")
+    p.add_argument("--max-length", type=int, default=4096, help="Maximum sequence length")
+    p.add_argument("--no-bf16", action="store_true", help="Disable bfloat16 training")
+    p.add_argument("--report-to", default="wandb", help="Reporting integration (wandb, none)")
+    p.add_argument("--project-name", help="Wandb project name (default: {task}-classifier)")
+    p.add_argument("--experiment-name", help="Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})")
+    p.add_argument("--completion-only-loss", dest="completion_only_loss", action="store_true", default=True,
+                   help="Mask the prompt out of the loss, training only on the gold label token(s) (default: on)")
+    p.add_argument("--no-completion-only-loss", dest="completion_only_loss", action="store_false",
+                   help="Train on the full sequence (prompt + label) instead of masking the prompt out of the loss")
+    p.add_argument("--use-lora", action="store_true", help="Train a LoRA adapter instead of full fine-tuning")
+    p.add_argument("--lora-r", type=int, default=16, help="LoRA rank (only used with --use-lora)")
+    p.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha (only used with --use-lora)")
+    p.add_argument("--lora-dropout", type=float, default=0.05, help="LoRA dropout (only used with --use-lora)")
+    p.add_argument("--lora-target-modules", nargs="+", default=None,
+                   help="Module names to adapt (only used with --use-lora); default lets peft pick the "
+                        "base model's standard attention/MLP projections")
+    p.add_argument("--depth-eval-batch-size", type=int, default=16,
+                   help="Batch size for the per-depth greedy-decode accuracy pass run at every evaluation")
+    p.add_argument("--depth-eval-max-new-tokens", type=int, default=4,
+                   help="Max new tokens to generate per held-out example when computing depth accuracy")
+    p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
+    p.add_argument("--models-name", help="Models directory name under models/ (default: data-name)")
+    p.set_defaults(func=cmd_train_classifier)
 
     # train_rl
     p = subparsers.add_parser("train_rl", help="Train RL model using verl (GRPO)")

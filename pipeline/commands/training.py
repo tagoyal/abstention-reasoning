@@ -7,7 +7,7 @@ import re
 import shutil
 from pathlib import Path
 
-from pipeline.core.io import load_json, load_parquet_shards
+from pipeline.core.io import load_json, load_parquet_shards, save_json
 from pipeline.core.method import Method, resolve_data_name, resolve_models_name
 from pipeline.core.utils import model_short_name as _get_model_short_name
 from pipeline.tasks import get_task
@@ -26,6 +26,98 @@ def _model_project_tag(model_path: str) -> str:
     # Truncate after model size indicator (e.g., "qwen3-4b-up4x" -> "qwen3-4b")
     match = re.match(r'(.*?\d+\.?\d*b)', name, re.IGNORECASE)
     return match.group(1) if match else name
+
+
+def _finalize_training_run(
+    trainer,
+    tokenizer,
+    output_path: Path,
+    has_eval: bool,
+) -> Path:
+    """Save trainer output as best/last/model (with eval) or model/ alone
+    (without). Shared by train_sft and train_classifier so both checkpoint
+    layouts stay identical.
+    """
+    run_root = output_path.parent
+
+    def _clear(path: Path) -> None:
+        if path.is_symlink():
+            path.unlink()
+        elif path.exists():
+            shutil.rmtree(path)
+
+    if not has_eval:
+        # No validation signal -- nothing to pick a "best" epoch by, so
+        # just save the final weights as before.
+        trainer.save_model(str(output_path))
+        tokenizer.save_pretrained(str(output_path))
+        print(f"Saved model to {output_path}")
+        return output_path
+
+    # Every epoch's weights already live on disk under run_root/checkpoint-N
+    # (the trainer's own rotation keeps at most save_total_limit of these,
+    # with load_best_model_at_end exempting the best one -- so this is never
+    # "all" epochs, just the 1-2 that matter). Move those directories straight
+    # into best/last rather than re-saving or copying full weights a second
+    # time, so disk usage never doubles.
+    checkpoint_dirs = sorted(
+        (d for d in run_root.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")),
+        key=lambda d: int(d.name.split("-")[-1]),
+    )
+    best_ckpt_path = (
+        Path(trainer.state.best_model_checkpoint).resolve()
+        if trainer.state.best_model_checkpoint else None
+    )
+    last_ckpt_dir = checkpoint_dirs[-1] if checkpoint_dirs else None
+    best_ckpt_dir = next(
+        (d for d in checkpoint_dirs if best_ckpt_path is not None and d.resolve() == best_ckpt_path),
+        None,
+    )
+
+    best_dest = run_root / "best"
+    last_dest = run_root / "last"
+    _clear(best_dest)
+    _clear(last_dest)
+
+    if best_ckpt_dir is not None:
+        shutil.move(str(best_ckpt_dir), str(best_dest))
+        tokenizer.save_pretrained(str(best_dest))  # cheap -- just ensures tokenizer files are present
+        print(f"Saved best model (eval_loss) to {best_dest}")
+    else:
+        # Rotation pruned the recorded best checkpoint (or there's none to
+        # find, e.g. a single epoch) -- load_best_model_at_end already
+        # reloaded those weights into trainer.model, so fall back to saving
+        # from memory.
+        trainer.save_model(str(best_dest))
+        tokenizer.save_pretrained(str(best_dest))
+        print(f"Saved best model (eval_loss) to {best_dest} (re-saved; raw checkpoint unavailable)")
+
+    if last_ckpt_dir is not None and last_ckpt_dir == best_ckpt_dir:
+        # Same epoch -- symlink instead of duplicating the weights on disk.
+        last_dest.symlink_to("best", target_is_directory=True)
+        print(f"last/ is the same checkpoint as best/ ({last_ckpt_dir.name}); symlinked")
+    elif last_ckpt_dir is not None:
+        shutil.move(str(last_ckpt_dir), str(last_dest))
+        tokenizer.save_pretrained(str(last_dest))
+        print(f"Saved last model (final epoch) to {last_dest}")
+    else:
+        # Shouldn't happen with save_strategy="epoch", but fall back to the
+        # best model rather than erroring.
+        last_dest.symlink_to("best", target_is_directory=True)
+
+    # Clean up any raw checkpoint dirs still on disk (there should be none
+    # left beyond what was just moved into best/last, but be defensive).
+    for d in checkpoint_dirs:
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=True)
+
+    # model/ -> best/, mirroring train_rl: the canonical path points at the
+    # checkpoint the run should be judged on.
+    _clear(output_path)
+    output_path.symlink_to("best", target_is_directory=True)
+    print(f"Saved model to {run_root} (best/, last/, model/ -> best/)")
+
+    return output_path
 
 
 def train_sft(
@@ -431,85 +523,463 @@ def train_sft(
 
     trainer.train()
 
-    def _clear(path: Path) -> None:
-        if path.is_symlink():
-            path.unlink()
-        elif path.exists():
-            shutil.rmtree(path)
+    return _finalize_training_run(trainer, tokenizer, output_path, has_eval)
 
-    if not has_eval:
-        # No validation signal -- nothing to pick a "best" epoch by, so
-        # just save the final weights as before.
-        trainer.save_model(str(output_path))
-        tokenizer.save_pretrained(str(output_path))
-        print(f"Saved model to {output_path}")
-        return output_path
 
-    # Every epoch's weights already live on disk under run_root/checkpoint-N
-    # (the trainer's own rotation keeps at most save_total_limit of these,
-    # with load_best_model_at_end exempting the best one -- so this is never
-    # "all" epochs, just the 1-2 that matter). Move those directories straight
-    # into best/last rather than re-saving or copying full weights a second
-    # time, so disk usage never doubles.
-    checkpoint_dirs = sorted(
-        (d for d in run_root.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")),
-        key=lambda d: int(d.name.split("-")[-1]),
+def train_classifier(
+    task_name: str,
+    base_model: str,
+    method_name: str | None = None,
+    run_id: str | None = None,
+    dataset_path: Path | None = None,
+    eval_dataset_path: Path | None = None,
+    output_path: Path | None = None,
+    epochs: int = 3,
+    batch_size: int = 4,
+    gradient_accumulation_steps: int = 4,
+    learning_rate: float = 1e-5,
+    warmup_ratio: float = 0.1,
+    max_length: int = 4096,
+    bf16: bool = True,
+    report_to: str = "wandb",
+    project_name: str | None = None,
+    experiment_name: str | None = None,
+    completion_only_loss: bool = True,
+    use_lora: bool = False,
+    lora_r: int = 16,
+    lora_alpha: int = 32,
+    lora_dropout: float = 0.05,
+    lora_target_modules: list[str] | None = None,
+    depth_eval_batch_size: int = 16,
+    depth_eval_max_new_tokens: int = 4,
+    data_name: str | None = None,
+    models_name: str | None = None,
+) -> Path:
+    """
+    Train a verifier/continue-vs-abstain classifier on `generate_tree` output.
+
+    Unlike train_sft (which filters to generations with `correct: True`),
+    `generate_tree` records carry no `correct` field -- each record's
+    `generation` is itself the gold label ("0"/"1", from thresholding
+    pass_rate), with `samples` kept only as the raw rollouts the label was
+    computed from. So every record is trained on; there is no correctness
+    filter here.
+
+    Each record also carries a `depth` (0 = root, increasing towards the
+    leaf) at which its partial rollout was probed. Pooled eval_loss can look
+    fine while the classifier is blind at a specific depth (e.g. it nails
+    the root's "will this solve at all" call but can't tell a near-finished
+    rollout from a stalled one) -- so every evaluation also greedily decodes
+    the held-out set and reports accuracy broken out by depth, not just loss.
+
+    Args:
+        task_name: Name of task
+        base_model: Base model to fine-tune
+        method_name: Method name for auto-derived paths
+        run_id: Run identifier for organizing outputs (default: "default")
+        dataset_path: Path to generate_tree output (default:
+            data/{data_name}/sft_datasets/sft_train__{method}__tree.json)
+        eval_dataset_path: Path to held-out tree dataset for validation loss
+            and depth-accuracy reporting (default:
+            data/{data_name}/sft_datasets/sft_val__{method}__tree.json if it
+            exists; both are skipped if neither this nor a method-derived
+            default is found)
+        output_path: Where to save trained model (default:
+            models/{models_name}/{method}_classifier/{run_id}/model)
+        data_name: Data directory name (default: task_name)
+        models_name: Models directory name (default: data_name)
+        epochs: Number of training epochs
+        batch_size: Per-device batch size
+        gradient_accumulation_steps: Gradient accumulation steps
+        learning_rate: Learning rate
+        warmup_ratio: Warmup ratio
+        max_length: Maximum sequence length
+        bf16: Use bfloat16 training
+        report_to: Reporting integration ("none", "wandb", etc.)
+        project_name: Wandb project name (default: {task}-classifier)
+        experiment_name: Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})
+        completion_only_loss: Mask the prompt out of the loss, training only
+            on the gold "0"/"1" label token(s). Default True (unlike
+            train_sft's full-sequence default) -- the prompt here is the
+            entire partial rollout being judged, not something the
+            classifier should learn to reproduce.
+        use_lora: Train a LoRA adapter instead of full fine-tuning.
+        lora_r: LoRA rank (only used when use_lora=True).
+        lora_alpha: LoRA alpha (only used when use_lora=True).
+        lora_dropout: LoRA dropout (only used when use_lora=True).
+        lora_target_modules: Module names to adapt (only used when
+            use_lora=True); default None lets peft pick the base model's
+            standard attention/MLP projections.
+        depth_eval_batch_size: Batch size for the per-depth greedy-decode
+            accuracy pass run at every evaluation.
+        depth_eval_max_new_tokens: Max new tokens to generate per held-out
+            example when computing depth accuracy (the label is a single
+            digit, so this only needs to be a few tokens).
+
+    Returns:
+        Path to trained model
+    """
+    from datasets import Dataset
+    from trl import SFTTrainer, SFTConfig
+    from transformers import AutoTokenizer, TrainerCallback
+
+    data_name = resolve_data_name(task_name, data_name)
+    models_name = resolve_models_name(data_name, models_name)
+
+    method = None
+    if method_name is not None:
+        method = Method.load(method_name, task_name)
+
+    # generate_tree names its output `{split}__{method}__tree__{run_id}.json`
+    # when it was given a run_id, and `{split}__{method}__tree.json` otherwise
+    # (pipeline/commands/data.py's own `desc = f"tree__{run_id}" if run_id
+    # else "tree"`). Mirror that here: a run_id-suffixed dataset takes
+    # priority (it's the one generate_tree would have produced for this same
+    # run_id), falling back to the bare "tree" dataset shared across runs.
+    def _tree_descs() -> list[str]:
+        return [f"tree__{run_id}", "tree"] if run_id else ["tree"]
+
+    if dataset_path is None:
+        if method is None:
+            raise ValueError(
+                "Either --method or --dataset must be specified. "
+                "Use --method to auto-derive paths, or --dataset for explicit paths."
+            )
+        descs = _tree_descs()
+        candidates = [method.dataset_path(data_name, "sft_train", desc=d) for d in descs]
+        dataset_path = next((c for c in candidates if c.exists()), None)
+        if dataset_path is None:
+            looked_for = ", ".join(method.artifact_stem("sft_train", desc=d) + ".json" for d in descs)
+            raise FileNotFoundError(
+                f"No tree dataset for method '{method.name}' in "
+                f"{method.datasets_dir(data_name)} (looked for {looked_for}). "
+                f"Run 'python -m pipeline generate_tree --task {task_name} --method {method_name}' first."
+            )
+
+    if eval_dataset_path is None and method is not None:
+        candidate = next(
+            (c for c in (method.dataset_path(data_name, "sft_val", desc=d) for d in _tree_descs()) if c.exists()),
+            None,
+        )
+        if candidate is not None:
+            eval_dataset_path = candidate
+
+    if output_path is None:
+        if method is None:
+            raise ValueError(
+                "Either --method or --output must be specified. "
+                "Use --method to auto-derive paths, or --output for explicit paths."
+            )
+        method.ensure_classifier_run_dir(models_name, run_id)
+        output_path = method.classifier_model_path(models_name, run_id)
+
+    if project_name is None:
+        project_name = f"{task_name}-classifier-{_model_project_tag(base_model)}"
+
+    if experiment_name is None:
+        method_str = method_name if method_name else "default"
+        run_id_str = run_id if run_id else "default"
+        experiment_name = f"{method_str}-{run_id_str}"
+
+    run_id_display = run_id or "default"
+    print(f"=== Classifier Training Configuration ===")
+    print(f"Task: {task_name}")
+    print(f"Method: {method_name or 'default'}")
+    print(f"Run ID: {run_id_display}")
+    print(f"Base Model: {base_model}")
+    print(f"Dataset: {dataset_path}")
+    print(f"Eval Dataset: {eval_dataset_path or '(none -- validation loss and depth accuracy disabled)'}")
+    print(f"Output: {output_path}")
+    print(f"Project: {project_name}")
+    print(f"Experiment: {experiment_name}")
+    print(f"Report to: {report_to}")
+    print(f"LoRA: {use_lora}")
+    print(f"==========================================")
+
+    # Load tokenizer
+    print(f"Loading tokenizer for {base_model}")
+    tokenizer = AutoTokenizer.from_pretrained(base_model)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    def _gold_label(ex: dict) -> int:
+        # `label` is the int the generator thresholded pass_rate against;
+        # `generation` is just str(label). Prefer `label` but fall back to
+        # parsing `generation` so this also accepts hand-built tree-format
+        # data that only set one of the two.
+        if "label" in ex:
+            return int(ex["label"])
+        return int(ex["generation"])
+
+    def format_examples(examples: list[dict]) -> list[dict]:
+        """prompt/completion pairs for SFTTrainer. "<answer>" is appended to
+        the prompt as a cue token (so the model learns it signals "output
+        the 0/1 label now"); the completion/loss target is still the bare
+        "0"/"1" label, exactly as generate_tree wrote it."""
+        formatted = []
+        for ex in examples:
+            messages = ex["prompt"]
+            if messages and messages[-1]["role"] == "assistant":
+                conversation = messages[:-1]
+                assistant_prefix = messages[-1]["content"]
+            else:
+                conversation = messages
+                assistant_prefix = ""
+
+            prompt = tokenizer.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            # "<answer>" is a cue appended to the prompt (not the loss
+            # target) so the model learns that this token means "now output
+            # the 0/1 label" -- the completion itself is still bare "0"/"1",
+            # exactly as generate_tree wrote it.
+            prompt = prompt + assistant_prefix + "<answer>"
+            completion = ex["generation"]
+
+            formatted.append({"prompt": prompt, "completion": completion})
+        return formatted
+
+    def format_for_depth_eval(examples: list[dict]) -> list[dict]:
+        """Prompt-only (no completion) + gold label + depth, for the greedy
+        decode accuracy pass -- paired 1:1 with format_examples's prompts."""
+        depth_examples = []
+        for ex in examples:
+            messages = ex["prompt"]
+            if messages and messages[-1]["role"] == "assistant":
+                conversation = messages[:-1]
+                assistant_prefix = messages[-1]["content"]
+            else:
+                conversation = messages
+                assistant_prefix = ""
+
+            prompt = tokenizer.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            depth_examples.append({
+                "index": ex.get("index"),
+                "prompt": prompt + assistant_prefix + "<answer>",
+                "label": _gold_label(ex),
+                "depth": ex.get("depth", 0),
+            })
+        return depth_examples
+
+    # Load train
+    print(f"Loading dataset from {dataset_path}")
+    train_examples = load_json(dataset_path)
+    print(f"Loaded {len(train_examples)} examples (all used -- gold labels, no correctness filter)")
+    train_dataset = Dataset.from_list(format_examples(train_examples))
+    print(f"Train: {len(train_dataset)}")
+
+    # Load val
+    eval_dataset = None
+    depth_eval_examples: list[dict] = []
+    if eval_dataset_path is not None:
+        print(f"Loading eval dataset from {eval_dataset_path}")
+        eval_examples = load_json(eval_dataset_path)
+        if eval_examples:
+            eval_dataset = Dataset.from_list(format_examples(eval_examples))
+            depth_eval_examples = format_for_depth_eval(eval_examples)
+            print(f"Eval: {len(eval_dataset)}")
+        else:
+            print("  Eval dataset is empty -- skipping validation.")
+
+    has_eval = eval_dataset is not None
+
+    # LoRA adapter instead of full fine-tuning, if requested.
+    peft_config = None
+    if use_lora:
+        from peft import LoraConfig
+        peft_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            target_modules=lora_target_modules,
+            task_type="CAUSAL_LM",
+        )
+        print(f"Using LoRA: r={lora_r}, alpha={lora_alpha}, dropout={lora_dropout}, "
+              f"target_modules={lora_target_modules or '(peft default for base model)'}")
+
+    run_root = output_path.parent
+
+    training_args = SFTConfig(
+        output_dir=str(run_root),
+        num_train_epochs=epochs,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        learning_rate=learning_rate,
+        warmup_ratio=warmup_ratio,
+        max_length=max_length,
+        completion_only_loss=completion_only_loss,
+        logging_steps=10,
+        save_strategy="epoch" if has_eval else "no",
+        eval_strategy="epoch" if has_eval else "no",
+        save_total_limit=2 if has_eval else None,
+        load_best_model_at_end=has_eval,
+        metric_for_best_model="eval_loss" if has_eval else None,
+        greater_is_better=False if has_eval else None,
+        bf16=bf16,
+        report_to=report_to,
+        run_name=experiment_name,
     )
-    best_ckpt_path = (
-        Path(trainer.state.best_model_checkpoint).resolve()
-        if trainer.state.best_model_checkpoint else None
+
+    if report_to == "wandb":
+        import wandb
+        wandb.init(project=project_name, name=experiment_name, reinit=True)
+
+    class _DepthAccuracyCallback(TrainerCallback):
+        """Greedily decodes the held-out set at every evaluation and reports
+        label accuracy broken out by tree depth, alongside the pooled
+        eval_loss HF Trainer already logs. A verifier can look fine on
+        average while being blind at one specific depth, so depth is never
+        averaged away.
+
+        Nested inside train_classifier (rather than module-level) so it can
+        subclass TrainerCallback without a top-level `transformers` import --
+        CallbackHandler.call_event calls every event name unconditionally via
+        getattr, so a plain duck-typed object (defining only on_evaluate)
+        raises AttributeError on the other events.
+        """
+
+        def __init__(
+            self,
+            eval_examples: list[dict],
+            batch_size: int,
+            max_new_tokens: int,
+            run_root: Path,
+        ):
+            self.eval_examples = eval_examples  # [{"index", "prompt", "label", "depth"}, ...]
+            self.batch_size = batch_size
+            self.max_new_tokens = max_new_tokens
+            # Aggregate per-depth accuracy, one row per evaluation.
+            self.history_path = run_root / "depth_accuracy_history.json"
+            # Every held-out example's own prediction, one file per
+            # evaluation -- the aggregate accuracy above is computed from
+            # these, but the raw generations are what you need to look at
+            # misclassified examples later rather than just the headline
+            # number.
+            self.generations_dir = run_root / "val_generations"
+
+        def on_evaluate(self, args, state, control, model=None, **kwargs):
+            import torch
+            from collections import defaultdict
+
+            if model is None or not self.eval_examples:
+                return control
+
+            prev_padding_side = tokenizer.padding_side
+            tokenizer.padding_side = "left"
+            was_training = model.training
+            model.eval()
+
+            predictions: list[str] = []
+            device = next(model.parameters()).device
+            with torch.no_grad():
+                for i in range(0, len(self.eval_examples), self.batch_size):
+                    batch = self.eval_examples[i:i + self.batch_size]
+                    encoded = tokenizer(
+                        [ex["prompt"] for ex in batch],
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                    ).to(device)
+                    generated = model.generate(
+                        **encoded,
+                        max_new_tokens=self.max_new_tokens,
+                        do_sample=False,
+                        pad_token_id=tokenizer.pad_token_id,
+                    )
+                    new_tokens = generated[:, encoded["input_ids"].shape[1]:]
+                    predictions.extend(tokenizer.batch_decode(new_tokens, skip_special_tokens=True))
+
+            tokenizer.padding_side = prev_padding_side
+            if was_training:
+                model.train()
+
+            correct_by_depth: dict = defaultdict(int)
+            total_by_depth: dict = defaultdict(int)
+            per_example_records = []
+            for ex, text in zip(self.eval_examples, predictions):
+                stripped = text.strip()
+                predicted_label = int(stripped) if stripped in ("0", "1") else None
+                is_correct = predicted_label == ex["label"]
+                total_by_depth[ex["depth"]] += 1
+                if is_correct:
+                    correct_by_depth[ex["depth"]] += 1
+                per_example_records.append({
+                    "index": ex.get("index"),
+                    "depth": ex["depth"],
+                    "label": ex["label"],
+                    "generation": text,
+                    "predicted_label": predicted_label,
+                    "correct": is_correct,
+                })
+
+            log_payload = {}
+            overall_correct = overall_total = 0
+            print(f"\n=== Depth accuracy (step {state.global_step}) ===")
+            for depth in sorted(total_by_depth):
+                correct, total = correct_by_depth[depth], total_by_depth[depth]
+                accuracy = correct / total if total else 0.0
+                print(f"  depth {depth}: {accuracy:.2%} ({correct}/{total})")
+                log_payload[f"eval/depth_{depth}_accuracy"] = accuracy
+                overall_correct += correct
+                overall_total += total
+            overall_accuracy = overall_correct / overall_total if overall_total else 0.0
+            print(f"  overall: {overall_accuracy:.2%} ({overall_correct}/{overall_total})")
+            log_payload["eval/depth_overall_accuracy"] = overall_accuracy
+
+            if state.is_world_process_zero:
+                # Persisted locally regardless of --report-to, so the run is
+                # still analyzable without wandb (or if report_to=none).
+                self.generations_dir.mkdir(parents=True, exist_ok=True)
+                generations_path = self.generations_dir / f"step_{state.global_step}.json"
+                save_json(generations_path, per_example_records)
+                print(f"  Saved {len(per_example_records)} val generations to {generations_path}")
+
+                history = load_json(self.history_path) if self.history_path.exists() else []
+                history.append({
+                    "step": state.global_step,
+                    "epoch": state.epoch,
+                    **log_payload,
+                })
+                save_json(self.history_path, history)
+
+                try:
+                    import wandb
+                    if wandb.run is not None:
+                        wandb.log(log_payload, step=state.global_step)
+                except ImportError:
+                    pass
+
+            return control
+
+    callbacks = []
+    if depth_eval_examples:
+        callbacks.append(_DepthAccuracyCallback(
+            eval_examples=depth_eval_examples,
+            batch_size=depth_eval_batch_size,
+            max_new_tokens=depth_eval_max_new_tokens,
+            run_root=run_root,
+        ))
+
+    print(f"Starting training: {base_model} -> {output_path}")
+    trainer = SFTTrainer(
+        model=base_model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        peft_config=peft_config,
+        callbacks=callbacks,
     )
-    last_ckpt_dir = checkpoint_dirs[-1] if checkpoint_dirs else None
-    best_ckpt_dir = next(
-        (d for d in checkpoint_dirs if best_ckpt_path is not None and d.resolve() == best_ckpt_path),
-        None,
-    )
 
-    best_dest = run_root / "best"
-    last_dest = run_root / "last"
-    _clear(best_dest)
-    _clear(last_dest)
+    trainer.train()
 
-    if best_ckpt_dir is not None:
-        shutil.move(str(best_ckpt_dir), str(best_dest))
-        tokenizer.save_pretrained(str(best_dest))  # cheap -- just ensures tokenizer files are present
-        print(f"Saved best model (eval_loss) to {best_dest}")
-    else:
-        # Rotation pruned the recorded best checkpoint (or there's none to
-        # find, e.g. a single epoch) -- load_best_model_at_end already
-        # reloaded those weights into trainer.model, so fall back to saving
-        # from memory.
-        trainer.save_model(str(best_dest))
-        tokenizer.save_pretrained(str(best_dest))
-        print(f"Saved best model (eval_loss) to {best_dest} (re-saved; raw checkpoint unavailable)")
-
-    if last_ckpt_dir is not None and last_ckpt_dir == best_ckpt_dir:
-        # Same epoch -- symlink instead of duplicating the weights on disk.
-        last_dest.symlink_to("best", target_is_directory=True)
-        print(f"last/ is the same checkpoint as best/ ({last_ckpt_dir.name}); symlinked")
-    elif last_ckpt_dir is not None:
-        shutil.move(str(last_ckpt_dir), str(last_dest))
-        tokenizer.save_pretrained(str(last_dest))
-        print(f"Saved last model (final epoch) to {last_dest}")
-    else:
-        # Shouldn't happen with save_strategy="epoch", but fall back to the
-        # best model rather than erroring.
-        last_dest.symlink_to("best", target_is_directory=True)
-
-    # Clean up any raw checkpoint dirs still on disk (there should be none
-    # left beyond what was just moved into best/last, but be defensive).
-    for d in checkpoint_dirs:
-        if d.exists():
-            shutil.rmtree(d, ignore_errors=True)
-
-    # model/ -> best/, mirroring train_rl: the canonical path points at the
-    # checkpoint the run should be judged on.
-    _clear(output_path)
-    output_path.symlink_to("best", target_is_directory=True)
-    print(f"Saved model to {run_root} (best/, last/, model/ -> best/)")
-
-    return output_path
-
+    return _finalize_training_run(trainer, tokenizer, output_path, has_eval)
 
 def _wandb_run_id(run_dir: Path | None) -> str | None:
     """Return a stable wandb run id for this run directory, minting one if absent.

@@ -18,7 +18,7 @@ from .data import (
     generate_tree,
 )
 from .inference import analyze, combine_verifier_eval, evaluate, generate, generate_until_target
-from .training import train_sft, train_rl, convert_checkpoint
+from .training import train_sft, train_classifier, train_rl, convert_checkpoint
 
 __all__ = [
     # Data commands
@@ -37,6 +37,7 @@ __all__ = [
     "analyze",
     # Training commands
     "train_sft",
+    "train_classifier",
     "train_rl",
     "convert_checkpoint",
 ]

@@ -240,8 +240,11 @@ class Method:
         return MODELS_ROOT / models_name
 
     # Directory suffix per training stage. `_sft` holds the intermediate a
-    # method was initialized from; `_rl` holds the finished model, post-RL.
-    GROUP_SUFFIX = {"sft": "sft", "rl": "rl"}
+    # method was initialized from; `_rl` holds the finished model, post-RL;
+    # `_classifier` holds a verifier/continue-vs-abstain classifier trained
+    # on tree-labeled data (see generate_tree), independent of the sft/rl
+    # generation lineage.
+    GROUP_SUFFIX = {"sft": "sft", "rl": "rl", "classifier": "classifier"}
 
     def group_dir(self, models_name: str, stage: str) -> Path:
         """`models/{method}_{sft,rl}` -- e.g. models/baseline_sft, models/method_b_rl."""
@@ -314,17 +317,26 @@ class Method:
     def rl_run_dir(self, models_name: str, run_id: str) -> Path:
         return self.run_dir(models_name, "rl", run_id)
 
+    def classifier_run_dir(self, models_name: str, run_id: str) -> Path:
+        return self.run_dir(models_name, "classifier", run_id)
+
     def ensure_sft_run_dir(self, models_name: str, run_id: str) -> Path:
         return self._ensure_run_dir(self.sft_run_dir(models_name, run_id), models_name)
 
     def ensure_rl_run_dir(self, models_name: str, run_id: str) -> Path:
         return self._ensure_run_dir(self.rl_run_dir(models_name, run_id), models_name)
 
+    def ensure_classifier_run_dir(self, models_name: str, run_id: str) -> Path:
+        return self._ensure_run_dir(self.classifier_run_dir(models_name, run_id), models_name)
+
     def sft_model_path(self, models_name: str, run_id: str) -> Path:
         return self.sft_run_dir(models_name, run_id) / "model"
 
     def rl_model_path(self, models_name: str, run_id: str) -> Path:
         return self.rl_run_dir(models_name, run_id) / "model"
+
+    def classifier_model_path(self, models_name: str, run_id: str) -> Path:
+        return self.classifier_run_dir(models_name, run_id) / "model"
 
     def rl_checkpoints_dir(self, models_name: str, run_id: str) -> Path:
         return self.rl_run_dir(models_name, run_id) / "checkpoints"
