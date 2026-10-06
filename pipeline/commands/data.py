@@ -999,6 +999,11 @@ def generate_tree(
         output_path = method.dataset_path(data_name, split, desc=desc)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Suffix for scratch files (augmented prompts / depth eval results) so that
+    # concurrent generate_tree calls for the same task/method/split but
+    # different run_ids don't read/write each other's intermediates.
+    run_suffix = f"__{run_id}" if run_id else ""
+
     rng = random.Random(seed)
     num_steps = num_midpoints + 1  # number of i>0 iterations (midpoints + leaf)
 
@@ -1072,11 +1077,11 @@ def generate_tree(
                 }
                 augmented_prompts.append(prompts_by_index[index])
 
-            eval_prompts_path = method.scratch_path(data_name, split, desc=f"tree_depth{i}_prompts")
+            eval_prompts_path = method.scratch_path(data_name, split, desc=f"tree_depth{i}_prompts{run_suffix}")
             save_json(eval_prompts_path, augmented_prompts)
 
         depth_eval_path = method.scratch_path(
-            data_name, split, desc="tree_root_eval" if is_root else f"tree_depth{i}_eval"
+            data_name, split, desc=f"tree_root_eval{run_suffix}" if is_root else f"tree_depth{i}_eval{run_suffix}"
         )
         results_path = _evaluate_with_retry(
             evaluate,
