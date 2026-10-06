@@ -1,7 +1,10 @@
 #!/bin/bash
 # Generic train_classifier runner for one (task, data_name) combo -- cycles
 # through all run-ids (baseline_rl models), training a LoRA depth-accuracy
-# classifier on top of each one.
+# classifier on top of each one. Output path is explicitly suffixed with
+# "_b" (run_id itself is left as-is, since it's also used to resolve the
+# default dataset/base-model paths) so this doesn't overwrite the earlier
+# models/.../baseline_classifier/<run_id>/model runs.
 #
 # Usage: bash run_jobs_temp.sh <task> <data_name>
 
@@ -17,6 +20,7 @@ for RUN_ID in "${RUN_IDS[@]}"; do
     --task "${TASK}" --method baseline --run-id "${RUN_ID}" \
     --base-model "models/${DATA_NAME}/baseline_rl/${RUN_ID}/model" \
     --data-name "${DATA_NAME}" \
+    --output "models/${DATA_NAME}/baseline_classifier/${RUN_ID}_b/model" \
     --use-lora \
     --epochs 3 \
     --max-length 2048 \

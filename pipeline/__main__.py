@@ -396,6 +396,7 @@ def cmd_train_classifier(args):
         lora_target_modules=args.lora_target_modules,
         depth_eval_batch_size=args.depth_eval_batch_size,
         depth_eval_max_new_tokens=args.depth_eval_max_new_tokens,
+        balance_train=args.balance_train,
         data_name=args.data_name,
         models_name=args.models_name,
     )
@@ -845,6 +846,9 @@ def main():
                    help="Batch size for the per-depth greedy-decode accuracy pass run at every evaluation")
     p.add_argument("--depth-eval-max-new-tokens", type=int, default=4,
                    help="Max new tokens to generate per held-out example when computing depth accuracy")
+    p.add_argument("--balance-train", action="store_true",
+                   help="Upsample the minority label (with replacement) so train is 50/50 0/1. "
+                        "Eval/depth-accuracy is unaffected -- it stays on the true distribution.")
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.add_argument("--models-name", help="Models directory name under models/ (default: data-name)")
     p.set_defaults(func=cmd_train_classifier)

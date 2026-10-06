@@ -552,6 +552,7 @@ def train_classifier(
     lora_target_modules: list[str] | None = None,
     depth_eval_batch_size: int = 16,
     depth_eval_max_new_tokens: int = 4,
+    balance_train: bool = False,
     data_name: str | None = None,
     models_name: str | None = None,
 ) -> Path:
@@ -615,6 +616,10 @@ def train_classifier(
         depth_eval_max_new_tokens: Max new tokens to generate per held-out
             example when computing depth accuracy (the label is a single
             digit, so this only needs to be a few tokens).
+        balance_train: Upsample the minority label in the train set (with
+            replacement, randomly) so 0/1 are equally represented. Only
+            affects train -- eval/depth-accuracy stays on the true
+            distribution, since that's what reports realistic accuracy.
 
     Returns:
         Path to trained model
@@ -711,6 +716,30 @@ def train_classifier(
             return int(ex["label"])
         return int(ex["generation"])
 
+    def balance_examples(examples: list[dict]) -> list[dict]:
+        """Upsample (with replacement) the minority label so both classes
+        are equally represented -- train only, by design; see
+        balance_train's docstring entry for why eval stays untouched."""
+        import random
+        from collections import defaultdict
+
+        by_label: dict = defaultdict(list)
+        for ex in examples:
+            by_label[_gold_label(ex)].append(ex)
+        if len(by_label) < 2:
+            return examples  # nothing to balance against
+        majority_count = max(len(v) for v in by_label.values())
+        balanced = []
+        for label, group in by_label.items():
+            balanced.extend(group)
+            deficit = majority_count - len(group)
+            if deficit > 0:
+                balanced.extend(random.choices(group, k=deficit))
+        random.shuffle(balanced)
+        counts = {label: len(v) for label, v in by_label.items()}
+        print(f"  Balancing train: {counts} -> {majority_count} each ({len(balanced)} total)")
+        return balanced
+
     def format_examples(examples: list[dict]) -> list[dict]:
         """prompt/completion pairs for SFTTrainer. "<answer>" is appended to
         the prompt as a cue token (so the model learns it signals "output
@@ -771,6 +800,8 @@ def train_classifier(
     print(f"Loading dataset from {dataset_path}")
     train_examples = load_json(dataset_path)
     print(f"Loaded {len(train_examples)} examples (all used -- gold labels, no correctness filter)")
+    if balance_train:
+        train_examples = balance_examples(train_examples)
     train_dataset = Dataset.from_list(format_examples(train_examples))
     print(f"Train: {len(train_dataset)}")
 
