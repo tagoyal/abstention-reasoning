@@ -29,6 +29,14 @@ _reward = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_reward)
 _has_malformed_structure_nested = _reward.has_malformed_structure_nested
 
+# Bound on math-verify's sympy-based symbolic equivalence check, applied only
+# when _verify_answer is running on the main thread (see its docstring for
+# why). math-verify's own library default is 5s; a few pathological
+# predicted expressions have been observed to take much longer than that
+# under real model generations, so this is deliberately looser than the
+# library default rather than reusing it.
+_MATH_VERIFY_TIMEOUT_SECONDS = 30
+
 
 class MathTask(BaseTask):
     """
@@ -95,16 +103,29 @@ class MathTask(BaseTask):
     def _verify_answer(self, predicted: str, correct_answer: str) -> bool:
         """Verify predicted answer against correct answer using math-verify.
 
-        parsing_timeout=None / timeout_seconds=None disable math-verify's
-        default signal.alarm()-based timeout. That mechanism only works in a
-        process's main thread; check_correctness runs inside a
-        ThreadPoolExecutor (see select_best_sample's executor), where
-        signal.alarm() raises instead of timing out. Left at the default, every
-        parse/verify call here raises, is swallowed by the except Exception
-        blocks below, and is_correct silently stays False for every sample --
-        this previously caused 0% correctness for math specifically, since
-        countdown/sql don't go through math-verify.
+        math-verify's parsing_timeout/timeout_seconds are enforced with
+        signal.alarm(), which only works when called from the process's main
+        thread -- off the main thread, signal.signal() raises ValueError
+        immediately instead of timing out. check_correctness can run on
+        either kind of caller: `generate()`'s select_best_sample() dispatches
+        it through a ThreadPoolExecutor (added for SQL's I/O-bound checks),
+        while `evaluate()` calls it sequentially in the main thread. Passing
+        a fixed timeout unconditionally previously broke the threaded caller
+        (every parse/verify raised, was swallowed below, and is_correct
+        silently stayed False for 100% of samples -- not just pathological
+        ones). Passing `timeout=None` unconditionally (the previous fix)
+        avoided that but also disabled the timeout for the safe, sequential
+        caller, where math-verify's sympy-based symbolic equivalence check
+        can genuinely hang/balloon memory for an unbounded time on
+        pathological predicted expressions. So: bound it with a real timeout
+        only when we're actually on the main thread (where signal.alarm()
+        is safe), and keep it disabled everywhere else, exactly as before.
         """
+        import threading
+
+        on_main_thread = threading.current_thread() is threading.main_thread()
+        timeout = _MATH_VERIFY_TIMEOUT_SECONDS if on_main_thread else None
+
         from math_verify import parse, verify, LatexExtractionConfig, ExprExtractionConfig
 
         # Parse gold (LaTeX from dataset) and predicted (plain symbolic from model)
@@ -112,7 +133,7 @@ class MathTask(BaseTask):
             gold_parsed = parse(
                 f"${correct_answer}$",
                 extraction_config=[LatexExtractionConfig()],
-                parsing_timeout=None,
+                parsing_timeout=timeout,
             )
         except Exception:
             gold_parsed = []
@@ -121,7 +142,7 @@ class MathTask(BaseTask):
             pred_parsed = parse(
                 f"${predicted}$",
                 extraction_config=[LatexExtractionConfig(), ExprExtractionConfig()],
-                parsing_timeout=None,
+                parsing_timeout=timeout,
             )
         except Exception:
             pred_parsed = []
@@ -130,7 +151,7 @@ class MathTask(BaseTask):
         is_correct = False
         if gold_parsed and pred_parsed:
             try:
-                is_correct = verify(gold_parsed, pred_parsed, timeout_seconds=None)
+                is_correct = verify(gold_parsed, pred_parsed, timeout_seconds=timeout)
             except Exception:
                 pass
 
@@ -140,15 +161,15 @@ class MathTask(BaseTask):
                 gold_plain = parse(
                     correct_answer,
                     extraction_config=[ExprExtractionConfig()],
-                    parsing_timeout=None,
+                    parsing_timeout=timeout,
                 )
                 pred_plain = parse(
                     predicted,
                     extraction_config=[ExprExtractionConfig()],
-                    parsing_timeout=None,
+                    parsing_timeout=timeout,
                 )
                 if gold_plain and pred_plain:
-                    is_correct = verify(gold_plain, pred_plain, timeout_seconds=None)
+                    is_correct = verify(gold_plain, pred_plain, timeout_seconds=timeout)
             except Exception:
                 pass
 

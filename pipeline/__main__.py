@@ -663,7 +663,8 @@ def main():
     p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,rl}/. Required when --model is 'sft' or 'rl'.")
     p.add_argument("--split", required=True,
                    help="Which split to generate from. Required -- there is no default.")
-    p.add_argument("--output", help="Output path (default: data/{data_name}/sft_datasets/{split}__{method}__tree.json)")
+    p.add_argument("--output", help="Output path (default: data/{data_name}/sft_datasets/{split}__{method}__tree.json, "
+                                     "or ..._tree__{run_id}.json when --run-id is set)")
     p.add_argument("--num-midpoints", type=int, default=0,
                    help="Number of branch points between root and leaf (default: 0, "
                         "i.e. just root + leaf). Only the root step is implemented so far.")

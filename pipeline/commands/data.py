@@ -964,7 +964,10 @@ def generate_tree(
         run_id: Run identifier for model resolution (used when model_name is
             "sft" or "rl")
         output_path: Where to save the generated tree (default:
-            data/{data_name}/sft_datasets/{split}__{method}__tree.json)
+            data/{data_name}/sft_datasets/{split}__{method}__tree.json, or
+            ..._tree__{run_id}.json when run_id is set -- otherwise runs
+            against the same method/split with different run_ids would
+            overwrite each other's file)
         data_name: Data directory name (default: task_name)
         models_name: Models directory name (default: data_name)
         num_midpoints: Number of probe points strictly between root and leaf
@@ -992,7 +995,8 @@ def generate_tree(
     prompts_path = method.formatted_path(data_name, split)
 
     if output_path is None:
-        output_path = method.dataset_path(data_name, split, desc="tree")
+        desc = f"tree__{run_id}" if run_id else "tree"
+        output_path = method.dataset_path(data_name, split, desc=desc)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     rng = random.Random(seed)
