@@ -253,6 +253,32 @@ def cmd_generate(args):
     commands.generate(**gen_kwargs)
 
 
+def cmd_generate_tree(args):
+    """Generate a tree-structured dataset."""
+    commands.generate_tree(
+        task_name=args.task,
+        model_name=args.model,
+        method_name=args.method,
+        run_id=args.run_id,
+        split=args.split,
+        output_path=Path(args.output) if args.output else None,
+        data_name=args.data_name,
+        models_name=args.models_name,
+        num_midpoints=args.num_midpoints,
+        num_samples=args.num_samples,
+        threshold=args.threshold,
+        batch_size=args.batch_size,
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        tensor_parallel_size=args.tensor_parallel_size,
+        data_parallel_size=args.data_parallel_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        use_async=args.use_async,
+        seed=args.seed,
+    )
+
+
 def cmd_evaluate(args):
     """Evaluate model."""
     prompts_path = Path(args.prompts) if args.prompts else None
@@ -628,6 +654,35 @@ def main():
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.add_argument("--models-name", help="Models directory name under models/ (default: data-name)")
     p.set_defaults(func=cmd_generate)
+
+    # generate_tree
+    p = subparsers.add_parser("generate_tree", help="Run model on prompts to build a tree of solver rollouts with pass-rate labels")
+    p.add_argument("--task", required=True, help="Task name")
+    p.add_argument("--model", required=True, help="Model name or path (or 'sft'/'rl' shortcut)")
+    p.add_argument("--method", required=True, help="Method name for auto-derived paths")
+    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,rl}/. Required when --model is 'sft' or 'rl'.")
+    p.add_argument("--split", required=True,
+                   help="Which split to generate from. Required -- there is no default.")
+    p.add_argument("--output", help="Output path (default: data/{data_name}/sft_datasets/{split}__{method}__tree.json)")
+    p.add_argument("--num-midpoints", type=int, default=0,
+                   help="Number of branch points between root and leaf (default: 0, "
+                        "i.e. just root + leaf). Only the root step is implemented so far.")
+    p.add_argument("--num-samples", type=int, default=10,
+                   help="Rollouts per prompt at the root step (default: 10)")
+    p.add_argument("--threshold", type=float, default=0.5,
+                   help="Label 1 when pass_rate >= threshold (default: 0.5)")
+    p.add_argument("--batch-size", type=int, default=16, help="Batch size")
+    p.add_argument("--max-new-tokens", type=int, default=2048, help="Max new tokens")
+    p.add_argument("--temperature", type=float, default=0.7, help="Temperature")
+    p.add_argument("--top-p", type=float, default=0.9, help="Top-p")
+    p.add_argument("--tensor-parallel-size", type=int, default=1, help="Tensor parallel size")
+    p.add_argument("--data-parallel-size", type=int, default=1, help="Independent model replicas; prompts are sharded across them")
+    p.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="GPU memory utilization")
+    p.add_argument("--async", dest="use_async", action="store_true", help="Use async generation")
+    p.add_argument("--seed", type=int, default=42, help="Seed for generation (default: 42)")
+    p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
+    p.add_argument("--models-name", help="Models directory name under models/ (default: data-name)")
+    p.set_defaults(func=cmd_generate_tree)
 
     # evaluate
     p = subparsers.add_parser("evaluate", help="Evaluate model")

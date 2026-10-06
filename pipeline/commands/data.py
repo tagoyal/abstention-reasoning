@@ -844,6 +844,304 @@ def create_verification_data(
         raise ValueError(f"Unsupported method_name: {method_name!r}")
 
 
+def generate_tree(
+    task_name: str,
+    model_name: str,
+    method_name: str,
+    split: str,
+    run_id: str | None = None,
+    output_path: Path | None = None,
+    data_name: str | None = None,
+    models_name: str | None = None,
+    num_midpoints: int = 0,
+    num_samples: int = 10,
+    threshold: float = 0.5,
+    batch_size: int = 16,
+    max_new_tokens: int = 2048,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+    tensor_parallel_size: int = 1,
+    data_parallel_size: int = 1,
+    gpu_memory_utilization: float = 0.9,
+    use_async: bool = False,
+    seed: int | None = 42,
+) -> Path:
+    """Build a tree of solver rollouts, probing pass rate at `num_midpoints`
+    points between the root (no partial solution) and the leaf (one fully
+    representative rollout).
+
+    Root step (i == 0): runs the solver (`evaluate`) on the prompts already
+    created for this method/split -- no hints or other method-specific
+    machinery here, just `num_samples` independent rollouts per existing
+    prompt. Each prompt's label is a pass-rate threshold exactly like
+    `create_verification_data`'s method_a (1 if pass_rate >= threshold, else
+    0), but the recorded "generation" is the bare label ("0"/"1"), not
+    method_a's `<answer>{label}</answer>` completion -- there is no predictor
+    template involved here, just the raw rollouts and their aggregate label.
+    One of the root's `num_samples` rollouts is also picked uniformly at
+    random (not conditioned on correctness) as this datapoint's single
+    "representative" generation -- fixed for the rest of this call, used by
+    every later step below as the one trajectory being probed at different
+    points.
+
+    Midpoint steps (0 < i <= num_midpoints): distance_i = i / (num_midpoints +
+    1). The representative generation is truncated to its first
+    `distance_i` fraction of *words* (plain whitespace split, no tokenizer),
+    and that partial text is baked into an augmented prompts file as each
+    prompt's assistant-turn prefix (original prefix + partial words). That
+    file is then run through `evaluate` exactly like the root step -- same
+    batched generation, same correctness checking (against the real
+    ground truth, not a binary label) -- which keeps this step as a thin
+    wrapper around the root's machinery rather than a separate generation
+    path. The record stores the partial text plus evaluate's samples (with
+    the partial prefix re-attached to each sample's generation text, so the
+    full reasoning chain stays readable) -- i.e. "original input + partial
+    generation" is the new datapoint, same convention as the root.
+
+    Leaf step (i == num_midpoints + 1, distance == 1): no new generation --
+    this step reuses the representative generation chosen at the root
+    verbatim and labels it from that rollout's own (already known)
+    correctness, since distance 1 means the "partial" generation already is
+    the whole thing.
+
+    The full accumulated record list (every depth so far) is rewritten to
+    `output_path` after every i, so a later step failing never loses the
+    ones before it.
+
+    Args:
+        task_name: Name of task
+        model_name: Model to use for generation (or "sft"/"rl" shortcut, resolved
+            against the method's run, same as `generate`)
+        method_name: Method name -- required, same as every other method here;
+            works with any method
+        split: Which split to generate from. Required -- there is no default,
+            since picking one silently would make this easy to point at the
+            wrong partition.
+        run_id: Run identifier for model resolution (used when model_name is
+            "sft" or "rl")
+        output_path: Where to save the generated tree (default:
+            data/{data_name}/sft_datasets/{split}__{method}__tree.json)
+        data_name: Data directory name (default: task_name)
+        models_name: Models directory name (default: data_name)
+        num_midpoints: Number of probe points strictly between root and leaf
+            (default 0 -- just root + leaf, leaf then being distance 1 i.e.
+            the representative rollout's own label).
+        num_samples: Rollouts per prompt at the root step and at each midpoint.
+        threshold: Label 1 when pass_rate >= threshold (default 0.5).
+        ... generation config, forwarded to `evaluate`/the generator ...
+
+    Returns:
+        Path to created output file
+    """
+    if not split:
+        raise ValueError("--split is required for generate_tree (no default split)")
+    if num_midpoints < 0:
+        raise ValueError(f"num_midpoints must be >= 0, got {num_midpoints}")
+
+    data_name = resolve_data_name(task_name, data_name)
+    models_name = resolve_models_name(data_name, models_name)
+
+    method = Method.load(method_name, task_name)
+
+    # Prompts already created for this method/split -- no hints or other
+    # method-specific handling here, just whatever `create_prompts` produced.
+    prompts_path = method.formatted_path(data_name, split)
+
+    if output_path is None:
+        output_path = method.dataset_path(data_name, split, desc="tree")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rng = random.Random(seed)
+    num_steps = num_midpoints + 1  # number of i>0 iterations (midpoints + leaf)
+
+    # Per-index state carried from the root to every later step: the original
+    # conversation (minus its trailing assistant-prefix message, kept
+    # separately), and the one representative rollout picked at the root --
+    # fixed for the rest of this call.
+    rep_state: dict = {}
+    all_records: list = []
+
+    for i in range(num_steps + 1):
+        is_root = (i == 0)
+        distance = 0.0 if is_root else i / num_steps
+        is_leaf = (not is_root) and distance == 1.0
+
+        if is_leaf:
+            # distance == 1: the "partial" generation already is the whole
+            # representative rollout -- no new sampling, just its own label.
+            for index, state in rep_state.items():
+                label = int(state["rep_correct"])
+                assistant_content = state["assistant_prefix"]
+                rep_text = " ".join(state["rep_words"])
+                if rep_text:
+                    assistant_content = f"{assistant_content} {rep_text}"
+                all_records.append({
+                    **state["extra_meta"],
+                    "index": index,
+                    "depth": i,
+                    "distance": 1.0,
+                    "ground_truth": state["ground_truth"],
+                    "variant": state["variant"],
+                    "prompt": state["base_conversation"] + [{"role": "assistant", "content": assistant_content}],
+                    "num_samples": 1,
+                    "num_correct_samples": label,
+                    "pass_rate": float(label),
+                    "label": label,
+                    "generation": str(label),
+                })
+            save_json(output_path, all_records)
+            print(f"Saved leaf-level records (depth {i}, distance 1.0) to {output_path}")
+            continue
+
+        # Root (distance 0) and midpoints (0 < distance < 1) both just run
+        # `evaluate` on a prompts file and threshold the pass rate -- the
+        # only difference is which prompts file. Root reuses the prompts
+        # already created for this method/split verbatim; a midpoint bakes
+        # the representative rollout's first `distance` fraction of words
+        # into each prompt's assistant-turn prefix and writes that out as a
+        # scratch prompts file first.
+        from pipeline.commands.inference import evaluate
+
+        if is_root:
+            prompts_data = load_json(prompts_path)
+            prompts_by_index = {p["index"]: p for p in prompts_data}
+            eval_prompts_path = prompts_path
+        else:
+            prompts_by_index = {}
+            augmented_prompts = []
+            for index, state in rep_state.items():
+                cutoff = round(distance * len(state["rep_words"]))
+                partial_text = " ".join(state["rep_words"][:cutoff])
+                assistant_content = state["assistant_prefix"]
+                if partial_text:
+                    assistant_content = f"{assistant_content} {partial_text}"
+                prompt = state["base_conversation"] + [{"role": "assistant", "content": assistant_content}]
+                prompts_by_index[index] = {
+                    "index": index,
+                    "prompt": prompt,
+                    "ground_truth": state["ground_truth"],
+                    "variant": state["variant"],
+                }
+                augmented_prompts.append(prompts_by_index[index])
+
+            eval_prompts_path = method.scratch_path(data_name, split, desc=f"tree_depth{i}_prompts")
+            save_json(eval_prompts_path, augmented_prompts)
+
+        depth_eval_path = method.scratch_path(
+            data_name, split, desc="tree_root_eval" if is_root else f"tree_depth{i}_eval"
+        )
+        results_path = evaluate(
+            task_name=task_name,
+            model_name=model_name,
+            method_name=method_name,
+            run_id=run_id,
+            split=split,
+            prompts_path=eval_prompts_path,
+            output_path=depth_eval_path,
+            batch_size=batch_size,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            num_samples=num_samples,
+            tensor_parallel_size=tensor_parallel_size,
+            data_parallel_size=data_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+            use_async=use_async,
+            seed=seed,
+            data_name=data_name,
+            models_name=models_name,
+        )
+
+        results = load_json(results_path)
+        details = results["details"] if isinstance(results, dict) and "details" in results else results
+
+        positives = 0
+        for detail in details:
+            index = detail.get("index")
+            actual_samples = detail.get("n_samples")
+            correct_samples = detail.get("n_correct")
+            samples = detail.get("samples") or []
+            if actual_samples != num_samples:
+                raise ValueError(
+                    f"Index {index}: expected n_samples={num_samples}, "
+                    f"got {actual_samples!r}"
+                )
+
+            pass_rate = correct_samples / actual_samples
+            label = int(pass_rate >= threshold)
+            positives += label
+
+            # Carry forward every other field from the original prompts file
+            # (hint_sequence, source_index, hint_level, split, etc.)
+            if is_root:
+                extra_meta = {
+                    k: v for k, v in prompts_by_index[index].items()
+                    if k not in ("index", "prompt", "ground_truth", "variant")
+                }
+            else:
+                extra_meta = rep_state[index]["extra_meta"]
+
+            all_records.append({
+                **extra_meta,
+                "index": index,
+                "depth": i,
+                "distance": distance,
+                "ground_truth": detail.get("ground_truth"),
+                "variant": detail.get("variant", "unknown"),
+                "prompt": prompts_by_index[index]["prompt"],
+                "samples": samples,
+                "num_samples": actual_samples,
+                "num_correct_samples": correct_samples,
+                "pass_rate": pass_rate,
+                "label": label,
+                "generation": str(label),
+            })
+
+            if is_root:
+                # Pick this datapoint's one representative rollout -- uniform
+                # at random, not conditioned on correctness -- and remember
+                # everything later steps need to keep probing it.
+                rep_sample = rng.choice(samples)
+                conversation = prompts_by_index[index]["prompt"]
+                if conversation and conversation[-1]["role"] == "assistant":
+                    base_conversation = conversation[:-1]
+                    assistant_prefix = conversation[-1]["content"]
+                else:
+                    base_conversation = conversation
+                    assistant_prefix = ""
+
+                rep_state[index] = {
+                    "base_conversation": base_conversation,
+                    "assistant_prefix": assistant_prefix,
+                    "rep_words": rep_sample["generation"].split(),
+                    "rep_correct": bool(rep_sample["correct"]),
+                    "ground_truth": detail.get("ground_truth"),
+                    "variant": detail.get("variant", "unknown"),
+                    "extra_meta": extra_meta,
+                }
+
+        save_json(output_path, all_records)
+        print(
+            f"Saved depth {i} (distance {distance:.3f}) records to {output_path} "
+            f"(label 1: {positives}, label 0: {len(details) - positives})"
+        )
+
+    print(f"\nLabel distribution by depth ({output_path}):")
+    for depth in range(num_steps + 1):
+        depth_records = [r for r in all_records if r["depth"] == depth]
+        n = len(depth_records)
+        if n == 0:
+            continue
+        n_pos = sum(r["label"] for r in depth_records)
+        distance = depth_records[0]["distance"]
+        print(
+            f"  depth {depth} (distance {distance:.3f}): n={n}  "
+            f"label 0: {(n - n_pos) / n:.2%}  label 1: {n_pos / n:.2%}"
+        )
+
+    return output_path
+
+
 # === OOD (Out-of-Distribution) evaluation datasets ===
 
 

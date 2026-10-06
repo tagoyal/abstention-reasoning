@@ -15,6 +15,7 @@ from .data import (
     create_primitives,
     create_prompts,
     create_verification_data,
+    generate_tree,
 )
 from .inference import analyze, combine_verifier_eval, evaluate, generate, generate_until_target
 from .training import train_sft, train_rl, convert_checkpoint
@@ -27,6 +28,7 @@ __all__ = [
     "create_verification_data",
     "create_ood_prompts",
     "OOD_DATASETS",
+    "generate_tree",
     # Inference commands
     "generate",
     "generate_until_target",

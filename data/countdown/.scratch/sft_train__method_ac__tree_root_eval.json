@@ -1,0 +1,58 @@
+{
+  "details": [
+    {
+      "index": 0,
+      "ground_truth": {
+        "answer": "4"
+      },
+      "variant": "v1",
+      "n_samples": 4,
+      "n_correct": 3,
+      "samples": [
+        {
+          "generation": "g",
+          "correct": true
+        },
+        {
+          "generation": "g",
+          "correct": true
+        },
+        {
+          "generation": "g",
+          "correct": true
+        },
+        {
+          "generation": "g",
+          "correct": false
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "ground_truth": {
+        "answer": "5"
+      },
+      "variant": "v1",
+      "n_samples": 4,
+      "n_correct": 1,
+      "samples": [
+        {
+          "generation": "g",
+          "correct": false
+        },
+        {
+          "generation": "g",
+          "correct": false
+        },
+        {
+          "generation": "g",
+          "correct": false
+        },
+        {
+          "generation": "g",
+          "correct": true
+        }
+      ]
+    }
+  ]
+}
