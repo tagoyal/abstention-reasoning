@@ -15,7 +15,7 @@ from pathlib import Path
 HINT_LEVELS_PER_PROBLEM = 2
 HINT_LEVEL_DECAY = 0.7
 
-from pipeline.core.io import load_json, save_json, save_parquet
+from pipeline.core.io import is_parquet_prompts_path, load_json, load_prompts, save_json, save_parquet
 from pipeline.core.method import TASKS_ROOT, Method, get_primitives_path, partition_path, resolve_data_name, resolve_models_name
 from pipeline.tasks import get_task
 
@@ -988,6 +988,7 @@ def generate_tree(
     data_name = resolve_data_name(task_name, data_name)
     models_name = resolve_models_name(data_name, models_name)
 
+    task = get_task(task_name)
     method = Method.load(method_name, task_name)
 
     # Prompts already created for this method/split -- no hints or other
@@ -1056,7 +1057,13 @@ def generate_tree(
         from pipeline.commands.inference import evaluate
 
         if is_root:
-            prompts_data = load_json(prompts_path)
+            # `rl_*` splits are written as parquet (primitives + a template
+            # applied at train time by verl, not a rendered "prompt"
+            # conversation) -- render it the same way here via `load_prompts`
+            # so the root's "base_conversation"/"assistant_prefix" below are
+            # built from the same conversation the model trains on.
+            template = method.load_template(task_name, "rl") if is_parquet_prompts_path(prompts_path) else None
+            prompts_data = load_prompts(prompts_path, template=template, system_message=getattr(task, "system_message", None))
             prompts_by_index = {p["index"]: p for p in prompts_data}
             eval_prompts_path = prompts_path
         else:

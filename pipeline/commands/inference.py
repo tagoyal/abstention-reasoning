@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from pipeline.core.io import load_json, save_json
+from pipeline.core.io import is_parquet_prompts_path, load_json, load_prompts, save_json
 from pipeline.core.generator import Generator, GenerationConfig, AsyncGenerator
 from pipeline.core.method import Method, resolve_data_name, resolve_models_name
 from pipeline.core.utils import extract_answer, model_short_name
@@ -1453,8 +1453,17 @@ def evaluate(
             method, model_name, models_name, run_id, split, num_samples, no_hints,
         )
 
-    # Load prompts
-    prompts_data = load_json(prompts_path)
+    # Load prompts. `rl_*` splits are written as parquet (primitives + a
+    # template applied at train time by verl, not a rendered "prompt"
+    # conversation) -- `load_prompts` detects that and replays the same
+    # substitution verl's RLHFDataset does, using this method's rl.txt and
+    # the task's system message, so eval sees identical conversations.
+    template = (
+        method.load_template(task_name, "rl")
+        if method is not None and is_parquet_prompts_path(prompts_path)
+        else None
+    )
+    prompts_data = load_prompts(prompts_path, template=template, system_message=getattr(task, "system_message", None))
     print(f"Loaded {len(prompts_data)} prompts from {prompts_path}")
 
     # Initialize generator

@@ -86,3 +86,90 @@ def load_parquet_shards(path: Path | str) -> list[Path]:
             f"(looked for {path.stem}.shard*{path.suffix} in {path.parent})"
         )
     return shards
+
+
+def load_parquet_records(path: Path | str) -> list[dict]:
+    """Load all rows of a parquet prompts file (resolving shards via
+    `load_parquet_shards`) back into a list of dicts, mirroring the records
+    `save_parquet` was given -- nested fields (`primitive`, `reward_model`,
+    `extra_info`) come back as plain nested dicts/lists, not datasets.Dataset
+    feature objects."""
+    from datasets import concatenate_datasets, load_dataset
+
+    shards = load_parquet_shards(path)
+    dataframes = [load_dataset("parquet", data_files=str(shard))["train"] for shard in shards]
+    ds = dataframes[0] if len(dataframes) == 1 else concatenate_datasets(dataframes)
+    return ds.to_list()
+
+
+def is_parquet_prompts_path(path: Path | str) -> bool:
+    """True if `path` is (or has shards for) a parquet prompts file written
+    by `create_prompts`'s rl_* path, rather than a fully-rendered JSON one."""
+    path = Path(path)
+    if path.suffix == ".parquet":
+        return True
+    return (not path.exists()) and bool(list(path.parent.glob(f"{path.stem}.shard*.parquet")))
+
+
+def _render_runtime_prompt(primitive: dict, template: str) -> str:
+    """Substitute a primitive's fields into a `{key}`/`{{key}}`-templated
+    string, mirroring verl's RLHFDataset._apply_runtime_template exactly
+    (single-brace first, double-brace second) so eval-time rendering matches
+    what the model was actually trained on."""
+    content = template
+    for key, value in primitive.items():
+        content = content.replace(f"{{{key}}}", str(value))
+        content = content.replace(f"{{{{{key}}}}}", str(value))
+    return content
+
+
+def load_prompts(
+    path: Path | str,
+    template: str | None = None,
+    system_message: str | None = None,
+) -> list[dict]:
+    """Load a prompts file the way `evaluate`/`generate_tree` need it: a list
+    of records each carrying a rendered "prompt" chat conversation.
+
+    Transparently handles both formats `create_prompts` can write:
+    - JSON (sft_*, eval, etc): records already have a fully-rendered "prompt"
+      conversation -- returned as-is via `load_json`.
+    - Parquet (rl_*): records carry a raw "primitive" dict and no rendered
+      prompt -- verl's RLHFDataset renders it at train time by substituting
+      the primitive's fields into the method's rl.txt template and wrapping
+      the result in a [system?, user, assistant-prefix?] conversation (see
+      `_apply_runtime_template` in verl/verl/utils/dataset/rl_dataset.py).
+      This replays that exact substitution so eval/tree generation sees the
+      same conversations the model was actually trained on. `template` (the
+      method's rl.txt content, e.g. `method.load_template(task_name, "rl")`)
+      is required in this case; `system_message` (e.g. `task.system_message`)
+      is optional, matching verl's `runtime_system_message` default of None.
+    """
+    path = Path(path)
+    if not is_parquet_prompts_path(path):
+        return load_json(path)
+
+    if template is None:
+        raise ValueError(
+            f"{path} is a parquet prompts file (primitives + runtime "
+            "template, written for rl_* splits) -- pass `template` (e.g. "
+            "method.load_template(task_name, 'rl')) to render it into prompt "
+            "conversations."
+        )
+
+    rendered = []
+    for record in load_parquet_records(path):
+        primitive = record.get("primitive") or {}
+        messages = []
+        if system_message:
+            messages.append({"role": "system", "content": system_message})
+        messages.append({"role": "user", "content": _render_runtime_prompt(primitive, template)})
+        assistant_prefix = record.get("assistant_prefix")
+        if assistant_prefix:
+            messages.append({"role": "assistant", "content": assistant_prefix})
+
+        rendered.append({
+            **{k: v for k, v in record.items() if k != "primitive"},
+            "prompt": messages,
+        })
+    return rendered
