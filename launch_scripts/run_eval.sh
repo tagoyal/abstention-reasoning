@@ -21,7 +21,7 @@ RUN_ID="${MODEL}"
 #   --async \
 #   --num-samples 10
 
-for SPLIT in sft_train sft_val; do
+for SPLIT in rl_ver_train rl_ver_val; do
   python -m pipeline generate_tree \
     --task "${TASK}" \
     --method baseline \
