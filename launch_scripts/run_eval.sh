@@ -2,14 +2,15 @@
 # Generic evaluation runner for one (task, model) combo, evaluating the
 # baseline method's RL model.
 #
-# Usage: bash run_eval.sh <task> <model_short_name> <data_name>
-#   e.g. bash run_eval.sh countdown qwen2.5-1.5b countdown
+# Usage: bash run_eval.sh <task> <model_short_name> <data_name> [gpus]
+#   e.g. bash run_eval.sh countdown qwen2.5-1.5b countdown 2
 
 set -euo pipefail
 
 TASK="$1"
 MODEL="$2"
 DATA_NAME="$3"
+GPUS="${4:-1}"
 RUN_ID="${MODEL}"
 
 # python -m pipeline evaluate \
@@ -31,6 +32,7 @@ for SPLIT in rl_ver_train rl_ver_val; do
     --split "${SPLIT}" \
     --num-midpoints 2 \
     --num-samples 10 \
+    --data-parallel-size "${GPUS}" \
     --async
 done
 
