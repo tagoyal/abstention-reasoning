@@ -1510,12 +1510,18 @@ def evaluate(
             expanded_gts = [gt for gt in ground_truths for _ in range(num_samples)]
             print(f"Running async multi-turn generation on {len(prompts)} prompts x {num_samples} samples...")
             async_generator = AsyncGenerator(config)
-            expanded_results = asyncio.run(
-                async_generator.generate_with_hints_async(
-                    expanded_prompts,
-                    expanded_gts,
+            try:
+                expanded_results = asyncio.run(
+                    async_generator.generate_with_hints_async(
+                        expanded_prompts,
+                        expanded_gts,
+                    )
                 )
-            )
+            finally:
+                # Free the KV cache (and, with data_parallel_size>1, the per-rank
+                # engine-core subprocesses) before generate_tree's next depth
+                # tries to spin up a fresh engine on the same GPU(s).
+                async_generator.close()
             # Group back: every num_samples consecutive results belong to the same prompt
             generations = [
                 [r[0] for r in expanded_results[i * num_samples:(i + 1) * num_samples]]
@@ -1524,12 +1530,15 @@ def evaluate(
         else:
             print(f"Running async multi-turn generation on {len(prompts)} prompts...")
             async_generator = AsyncGenerator(config)
-            generations = asyncio.run(
-                async_generator.generate_with_hints_async(
-                    prompts,
-                    ground_truths,
+            try:
+                generations = asyncio.run(
+                    async_generator.generate_with_hints_async(
+                        prompts,
+                        ground_truths,
+                    )
                 )
-            )
+            finally:
+                async_generator.close()
 
     # Async regular generation
     elif use_async and not multi_turn:
@@ -1537,9 +1546,12 @@ def evaluate(
 
         print(f"Running async generation on {len(prompts)} prompts...")
         async_generator = AsyncGenerator(config)
-        generations = asyncio.run(
-            async_generator.generate_async(prompts, num_samples=num_samples)
-        )
+        try:
+            generations = asyncio.run(
+                async_generator.generate_async(prompts, num_samples=num_samples)
+            )
+        finally:
+            async_generator.close()
 
     # Sync multi-turn generation
     elif multi_turn:

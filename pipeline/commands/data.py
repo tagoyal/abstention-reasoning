@@ -847,11 +847,13 @@ def create_verification_data(
 
 
 # generate_tree reloads the vLLM engine once per `evaluate` call (root +
-# each midpoint/leaf step), and a just-finished engine's GPU memory isn't
-# always released before the next one tries to initialize -- a transient
-# teardown/startup race, not a real OOM. Retry a few times with a backoff
-# delay (plus a GC/cache clear) before giving up, rather than failing the
-# whole job on what's usually a few seconds of timing noise.
+# each midpoint/leaf step). `evaluate` now closes its AsyncGenerator (and thus
+# the engine-core subprocess(es)) in a finally block before returning, so GPU
+# memory should be released before the next depth tries to initialize. This
+# retry stays as a safety net for the rare remaining teardown/startup race
+# (e.g. driver-side cleanup lag) rather than failing the whole job on what's
+# normally a few seconds of timing noise -- but if it keeps firing, the
+# engine isn't actually being released and this is masking a real leak.
 _ENGINE_RACE_MARKERS = (
     "Engine core initialization failed",
     "Free memory on device",
