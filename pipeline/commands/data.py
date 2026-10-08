@@ -341,6 +341,14 @@ def _create_prompts_single(
 
     is_parquet = fmt == "parquet"
 
+    # Eval emits up to num_hints + 1 records per problem, so its record-index
+    # stride must be wide enough that indices stay unique.
+    index_stride = (
+        num_hints + 1
+        if uses_fixed_hint_levels and split_name == "eval"
+        else HINT_LEVELS_PER_PROBLEM
+    )
+
     # Interaction class name for multi-turn methods, e.g. "hint" -> "countdown_hint".
     # Only relevant to the parquet (runtime-templated) path.
     interaction_name = None
@@ -384,9 +392,13 @@ def _create_prompts_single(
             hints_list = _extract_hints_list(primitive)
             if uses_fixed_hint_levels:
                 max_hint_level = min(num_hints, len(hints_list))
-                hint_levels = _sample_hint_levels(
-                    random.Random(seed + primitive["index"]), max_hint_level
-                )
+                if split_name == "eval":
+                    # Eval covers every hint level (0..max) for each problem.
+                    hint_levels = list(range(max_hint_level + 1))
+                else:
+                    hint_levels = _sample_hint_levels(
+                        random.Random(seed + primitive["index"]), max_hint_level
+                    )
             if not is_parquet:
                 # json path renders `{hints}` (if the template uses it) from the raw list
                 primitive = {**primitive, "hints": hints_list[:num_hints]}
@@ -410,7 +422,7 @@ def _create_prompts_single(
             # Every sampled hint level for a primitive needs a distinct record
             # index; non-fixed-hint methods emit exactly one record per primitive.
             record_index = (
-                primitive["index"] * HINT_LEVELS_PER_PROBLEM + i
+                primitive["index"] * index_stride + i
                 if uses_fixed_hint_levels
                 else primitive["index"]
             )

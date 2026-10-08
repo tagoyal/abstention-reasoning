@@ -13,26 +13,27 @@ DATA_NAME="$3"
 GPUS="${4:-1}"
 RUN_ID="${MODEL}"
 
-# python -m pipeline evaluate \
-#   --task "${TASK}" \
-#   --method baseline \
-#   --run-id "${RUN_ID}" \
-#   --data-name "${DATA_NAME}" \
-#   --model rl \
-#   --async \
-#   --num-samples 10
+python -m pipeline evaluate \
+  --task "${TASK}" \
+  --method method_ac \
+  --run-id "${RUN_ID}" \
+  --data-name "${DATA_NAME}" \
+  --model rl \
+  --data-parallel-size "${GPUS}" \
+  --async \
+  --num-samples 10
 
-for SPLIT in rl_ver_train rl_ver_val; do
-  python -m pipeline generate_tree \
-    --task "${TASK}" \
-    --method baseline \
-    --run-id "${RUN_ID}" \
-    --data-name "${DATA_NAME}" \
-    --model rl \
-    --split "${SPLIT}" \
-    --num-midpoints 2 \
-    --num-samples 10 \
-    --data-parallel-size "${GPUS}" \
-    --async
-done
+# for SPLIT in rl_ver_train rl_ver_val; do
+#   python -m pipeline generate_tree \
+#     --task "${TASK}" \
+#     --method baseline \
+#     --run-id "${RUN_ID}" \
+#     --data-name "${DATA_NAME}" \
+#     --model rl \
+#     --split "${SPLIT}" \
+#     --num-midpoints 2 \
+#     --num-samples 10 \
+#     --data-parallel-size "${GPUS}" \
+#     --async
+# done
 
