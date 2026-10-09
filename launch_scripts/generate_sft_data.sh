@@ -8,13 +8,13 @@
 #     --data-name sql_partial_sql --num-samples 10 \
 #   --sample-strategy random
 
-for TASK in math; do
+for TASK in math sql; do
   DATA_NAME="$TASK"
   if [ "$TASK" = "sql" ]; then
-    DATA_NAME="sql_conceptual"
+    DATA_NAME="sql_partial_sols"
   fi
   if [ "$TASK" = "math" ]; then
-    DATA_NAME="math_o1"
+    DATA_NAME="math_o2"
   fi
   GEN_MODEL="Qwen/Qwen3-14B"
   if [ "$TASK" = "sql" ]; then
