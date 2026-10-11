@@ -24,11 +24,7 @@ fi
 #     --data-name sql_partial_sql --num-samples 10 \
 #   --sample-strategy random
 
-# python -m pipeline generate --task "${TASK}" --data-name "${DATA_NAME}" --method method_ac --model "${GEN_MODEL}" \
-# --split sft_train --num-samples 8 --sample-strategy random_correct --async 
 
-# python -m pipeline generate --task "${TASK}" --data-name "${DATA_NAME}" --method method_ac --model "${GEN_MODEL}" \
-# --split sft_val --num-samples 8 --sample-strategy random_correct --async 
 
 for SPLIT in sft_train sft_val; do
   python -m pipeline generate --task "${TASK}" --method baseline --async \
@@ -45,3 +41,9 @@ for SPLIT in sft_train sft_val; do
       --hint-target-fraction 0.5 --max-hints 5 --target-correct-rate 0.5 \
       --data-name "${DATA_NAME}"
 done
+
+python -m pipeline generate --task "${TASK}" --data-name "${DATA_NAME}" --method method_ac --model "${GEN_MODEL}" \
+--split sft_train --num-samples 8 --sample-strategy random_correct --async 
+
+python -m pipeline generate --task "${TASK}" --data-name "${DATA_NAME}" --method method_ac --model "${GEN_MODEL}" \
+--split sft_val --num-samples 8 --sample-strategy random_correct --async 
