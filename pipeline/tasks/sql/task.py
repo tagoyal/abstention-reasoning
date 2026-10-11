@@ -32,7 +32,7 @@ _spec.loader.exec_module(_reward)
 
 _verify_sql = _reward._verify_sql
 extract_answer = _reward.extract_answer
-has_malformed_structure_nested = _reward.has_malformed_structure_nested
+_has_malformed_structure_nested = _reward.has_malformed_structure_nested
 
 
 class SqlTask(BaseTask):

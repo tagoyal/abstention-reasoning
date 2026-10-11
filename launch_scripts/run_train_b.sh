@@ -48,8 +48,8 @@ python -m pipeline train_sft \
 
 python -m pipeline train_rl \
   --task "${TASK}" \
-  --method method_b__quad-a0.5 \
-  --run-id "${RUN_ID}" \
+  --method method_b \
+  --run-id "${RUN_ID}"_quad-a0.5 \
   --sft-model "models/${DATA_NAME}/method_b_sft/${RUN_ID}/model" \
   --data-name "${DATA_NAME}" \
   --override algorithm.norm_adv_by_std_in_grpo=True \
