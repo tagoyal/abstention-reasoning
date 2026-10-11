@@ -81,7 +81,7 @@ def apply_exhausted_penalty(
 
 
 def hint_cost(hints_used: int, hint_penalty: float, shape: str = "linear",
-              alpha: float = 1.0) -> float:
+              alpha: float = 1.0, base: float = 0.0) -> float:
     """Fraction of the base score forfeited for using ``hints_used`` hints.
 
     ``linear``     charges alpha*hint_penalty per hint.
@@ -93,15 +93,20 @@ def hint_cost(hints_used: int, hint_penalty: float, shape: str = "linear",
     alpha is the sweep knob; it scales both shapes and defaults to 1.0, so a
     linear run with alpha unset scores exactly as it did before.
 
+    base is a fixed cost added whenever at least one hint was used (not scaled
+    by alpha), so the first hint is never nearly free. Defaults to 0.0.
+
     The cost is not clamped here; the caller clamps the final score at 0. With
     every problem carrying 5 hints, quadratic at hint_penalty=0.1 goes
     degenerate at alpha >= 0.6, where a *correct* full-ladder answer scores at
     or below the format_score paid for a *wrong* one.
     """
+    if hints_used <= 0:
+        return 0.0
     if shape == "linear":
-        return alpha * hint_penalty * hints_used
+        return base + alpha * hint_penalty * hints_used
     if shape == "quadratic":
-        return alpha * hint_penalty * hints_used * (hints_used + 1) / 2
+        return base + alpha * hint_penalty * hints_used * (hints_used + 1) / 2
     raise ValueError(f"unknown hint_penalty_shape {shape!r}; expected linear or quadratic")
 
 
@@ -220,6 +225,7 @@ def compute_score(
     hint_penalty: float = 0.1,
     hint_penalty_shape: str = "linear",
     hint_penalty_alpha: float = 1.0,
+    hint_penalty_base: float = 0.0,
     hint_bonus: float = 0.0,
     nested_request: bool = False,
     exhausted_penalty: float = 0.0,
@@ -241,6 +247,8 @@ def compute_score(
         hint_penalty_shape: "linear" (cost = hint_penalty*k) or "quadratic"
             (cost = hint_penalty*k*(k+1)/2, i.e. the k-th hint costs
             hint_penalty*k). See hint_cost.
+        hint_penalty_base: Fixed cost charged once if any hint was used,
+            added to the shape cost (default 0.0). See hint_cost.
         hint_bonus: Bonus added to format_score when hints were used and
             answer is wrong but formatted (default 0.0, no bonus)
         nested_request: Score against the inline-request grammar, where
@@ -318,7 +326,7 @@ def compute_score(
         final_score = base_score
         if penalize_hint:
             final_score = max(
-                base_score * (1 - hint_cost(hints_used, hint_penalty, hint_penalty_shape, hint_penalty_alpha)), 0)
+                base_score * (1 - hint_cost(hints_used, hint_penalty, hint_penalty_shape, hint_penalty_alpha, hint_penalty_base)), 0)
         final_score = apply_exhausted_penalty(
             final_score, num_exhausted, exhausted_penalty, max_exhausted_requests)
         return {

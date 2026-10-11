@@ -307,12 +307,18 @@ def hint_cost(
     hint_penalty: float,
     shape: str = "linear",
     alpha: float = 1.0,
+    base: float = 0.0,
 ) -> float:
-    """Fraction of base score forfeited for using hints."""
+    """Fraction of base score forfeited for using hints.
+
+    base is a fixed cost charged once if any hint was used (not scaled by alpha).
+    """
+    if hints_used <= 0:
+        return 0.0
     if shape == "linear":
-        return alpha * hint_penalty * hints_used
+        return base + alpha * hint_penalty * hints_used
     if shape == "quadratic":
-        return alpha * hint_penalty * hints_used * (hints_used + 1) / 2
+        return base + alpha * hint_penalty * hints_used * (hints_used + 1) / 2
     raise ValueError(f"unknown hint_penalty_shape {shape!r}; expected linear or quadratic")
 
 
@@ -364,6 +370,7 @@ def compute_score(
     hint_penalty: float = 0.1,
     hint_penalty_shape: str = "linear",
     hint_penalty_alpha: float = 1.0,
+    hint_penalty_base: float = 0.0,
     hint_bonus: float = 0.0,
     nested_request: bool = False,
     exhausted_penalty: float = 0.0,
@@ -419,7 +426,7 @@ def compute_score(
         base_score = score
         final_score = base_score
         if penalize_hint:
-            cost = hint_cost(hints_used, hint_penalty, hint_penalty_shape, hint_penalty_alpha)
+            cost = hint_cost(hints_used, hint_penalty, hint_penalty_shape, hint_penalty_alpha, hint_penalty_base)
             final_score = max(base_score * (1.0 - cost), 0.0)
         final_score = apply_exhausted_penalty(
             final_score, num_exhausted, exhausted_penalty, max_exhausted_requests

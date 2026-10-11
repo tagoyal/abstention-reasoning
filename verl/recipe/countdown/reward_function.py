@@ -74,7 +74,7 @@ def get_num_hints(solution_str):
 
 
 def hint_cost(hints_used: int, hint_penalty: float, shape: str = "linear",
-              alpha: float = 1.0) -> float:
+              alpha: float = 1.0, base: float = 0.0) -> float:
     """Fraction of the base score forfeited for using ``hints_used`` hints.
 
     ``linear``     charges alpha*hint_penalty per hint.
@@ -86,6 +86,9 @@ def hint_cost(hints_used: int, hint_penalty: float, shape: str = "linear",
     alpha is the sweep knob; it scales both shapes and defaults to 1.0, so a
     linear run with alpha unset scores exactly as it did before.
 
+    base is a fixed cost added whenever at least one hint was used (not scaled
+    by alpha), so the first hint is never nearly free. Defaults to 0.0.
+
     Duplicated from recipe/math/reward_function.py: the two recipes
     have no cross-import path today and this runs inside the rollout workers,
     where a new import is the wrong thing to discover at step 1. Keep in step.
@@ -95,10 +98,12 @@ def hint_cost(hints_used: int, hint_penalty: float, shape: str = "linear",
     degenerate at alpha >= 0.6, where a *correct* full-ladder answer scores at
     or below the format_score paid for a *wrong* one.
     """
+    if hints_used <= 0:
+        return 0.0
     if shape == "linear":
-        return alpha * hint_penalty * hints_used
+        return base + alpha * hint_penalty * hints_used
     if shape == "quadratic":
-        return alpha * hint_penalty * hints_used * (hints_used + 1) / 2
+        return base + alpha * hint_penalty * hints_used * (hints_used + 1) / 2
     raise ValueError(f"unknown hint_penalty_shape {shape!r}; expected linear or quadratic")
 
 
@@ -161,7 +166,7 @@ def has_malformed_structure(solution_str):
     return True  # Ran out of tags without proper termination
 
 
-def compute_score(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., penalize_hint=False, hint_penalty=0.2, hint_penalty_shape='linear', hint_penalty_alpha=1.0, hint_bonus=0.0, nested_request=False, **kwargs):
+def compute_score(data_source, solution_str, ground_truth, extra_info, method='strict', format_score=0.1, score=1., penalize_hint=False, hint_penalty=0.2, hint_penalty_shape='linear', hint_penalty_alpha=1.0, hint_penalty_base=0.0, hint_bonus=0.0, nested_request=False, **kwargs):
     """The scoring function for countdown
     """
     #format_score = 0
@@ -228,7 +233,7 @@ def compute_score(data_source, solution_str, ground_truth, extra_info, method='s
             if penalize_hint:
                 penalized_hints = min(num_hints, 5)
                 final_score = max(
-                    score * (1 - hint_cost(penalized_hints, hint_penalty, hint_penalty_shape, hint_penalty_alpha)), 0)
+                    score * (1 - hint_cost(penalized_hints, hint_penalty, hint_penalty_shape, hint_penalty_alpha, hint_penalty_base)), 0)
             else:
                 final_score = score
             return {"score": final_score, "score_wo_hint_penalty": score, "num_hints": num_hints, "abstained": False, "malformed": False, "correct": True}
