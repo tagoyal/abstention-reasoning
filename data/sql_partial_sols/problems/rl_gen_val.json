@@ -22282,45 +22282,6 @@
     }
   },
   {
-    "index": 15318,
-    "variant": "college_1",
-    "level": "extra",
-    "problem": "Database Schema:\nCREATE TABLE `CLASS` (\n  `CLASS_CODE` TEXT,\n  `CRS_CODE` TEXT REFERENCES `COURSE`(`CRS_CODE`),\n  `CLASS_SECTION` TEXT,\n  `CLASS_TIME` TEXT,\n  `CLASS_ROOM` TEXT,\n  `PROF_NUM` NUMBER REFERENCES `EMPLOYEE`(`EMP_NUM`),\n  PRIMARY KEY (`CLASS_CODE`)\n);\n\nCREATE TABLE `COURSE` (\n  `CRS_CODE` TEXT,\n  `DEPT_CODE` TEXT REFERENCES `DEPARTMENT`(`DEPT_CODE`),\n  `CRS_DESCRIPTION` TEXT,\n  `CRS_CREDIT` NUMBER,\n  PRIMARY KEY (`CRS_CODE`)\n);\n\nCREATE TABLE `DEPARTMENT` (\n  `DEPT_CODE` TEXT,\n  `DEPT_NAME` TEXT,\n  `SCHOOL_CODE` TEXT,\n  `EMP_NUM` NUMBER REFERENCES `EMPLOYEE`(`EMP_NUM`),\n  `DEPT_ADDRESS` TEXT,\n  `DEPT_EXTENSION` TEXT,\n  PRIMARY KEY (`DEPT_CODE`)\n);\n\nCREATE TABLE `EMPLOYEE` (\n  `EMP_NUM` NUMBER,\n  `EMP_LNAME` TEXT,\n  `EMP_FNAME` TEXT,\n  `EMP_INITIAL` TEXT,\n  `EMP_JOBCODE` TEXT,\n  `EMP_HIREDATE` TIME,\n  `EMP_DOB` TIME,\n  PRIMARY KEY (`EMP_NUM`)\n);\n\nCREATE TABLE `ENROLL` (\n  `CLASS_CODE` TEXT REFERENCES `CLASS`(`CLASS_CODE`),\n  `STU_NUM` NUMBER REFERENCES `STUDENT`(`STU_NUM`),\n  `ENROLL_GRADE` TEXT\n);\n\nCREATE TABLE `PROFESSOR` (\n  `EMP_NUM` NUMBER REFERENCES `EMPLOYEE`(`EMP_NUM`),\n  `DEPT_CODE` TEXT REFERENCES `DEPARTMENT`(`DEPT_CODE`),\n  `PROF_OFFICE` TEXT,\n  `PROF_EXTENSION` TEXT,\n  `PROF_HIGH_DEGREE` TEXT\n);\n\nCREATE TABLE `STUDENT` (\n  `STU_NUM` NUMBER,\n  `STU_LNAME` TEXT,\n  `STU_FNAME` TEXT,\n  `STU_INIT` TEXT,\n  `STU_DOB` TIME,\n  `STU_HRS` NUMBER,\n  `STU_CLASS` TEXT,\n  `STU_GPA` NUMBER,\n  `STU_TRANSFER` NUMBER,\n  `DEPT_CODE` TEXT REFERENCES `DEPARTMENT`(`DEPT_CODE`),\n  `STU_PHONE` TEXT,\n  `PROF_NUM` NUMBER,\n  PRIMARY KEY (`STU_NUM`)\n);\n\nQuestion:\nFind the first name of student who is taking classes from accounting and Computer Info. Systems departments",
-    "answer": "SELECT T1.stu_fname FROM student AS T1 JOIN enroll AS T2 ON T1.stu_num  =  T2.stu_num JOIN CLASS AS T3 ON T2.class_code  =  T3.class_code JOIN course AS T4 ON T3.crs_code  =  T4.crs_code JOIN department AS T5 ON T5.dept_code  =  T4.dept_code WHERE T5.dept_name  =  'Accounting' INTERSECT SELECT T1.stu_fname FROM student AS T1 JOIN enroll AS T2 ON T1.stu_num  =  T2.stu_num JOIN CLASS AS T3 ON T2.class_code  =  T3.class_code JOIN course AS T4 ON T3.crs_code  =  T4.crs_code JOIN department AS T5 ON T5.dept_code  =  T4.dept_code WHERE T5.dept_name  =  'Computer Info. Systems'",
-    "metadata": {
-      "source": "cosql",
-      "split": "train",
-      "db_id": "college_1",
-      "question": "Find the first name of student who is taking classes from accounting and Computer Info. Systems departments",
-      "evidence": null,
-      "difficulty": "extra",
-      "original_difficulty": "extra",
-      "interaction_length": 3,
-      "intermediate_turns": [
-        {
-          "turn_idx": 0,
-          "question": "What are the first names of all students who are taking classes from the accounting department?",
-          "sql": "SELECT T1.stu_fname FROM student AS T1 JOIN enroll AS T2 ON T1.stu_num   =   T2.stu_num JOIN CLASS AS T3 ON T2.class_code   =   T3.class_code JOIN course AS T4 ON T3.crs_code   =   T4.crs_code JOIN department AS T5 ON T5.dept_code   =   T4.dept_code WHERE T5.dept_name   =   'Accounting'"
-        },
-        {
-          "turn_idx": 1,
-          "question": "What are the first names of all students who are taking classes from the Computer Info. Systems department?",
-          "sql": "SELECT T1.stu_fname FROM student AS T1 JOIN enroll AS T2 ON T1.stu_num   =   T2.stu_num JOIN CLASS AS T3 ON T2.class_code   =   T3.class_code JOIN course AS T4 ON T3.crs_code   =   T4.crs_code JOIN department AS T5 ON T5.dept_code   =   T4.dept_code WHERE T5.dept_name   =   'Computer Info. Systems'"
-        },
-        {
-          "turn_idx": 2,
-          "question": "What are the first names of all students who are taking classes from both the accounting department and the Computer Info. Systems department?",
-          "sql": "SELECT T1.stu_fname FROM student AS T1 JOIN enroll AS T2 ON T1.stu_num   =   T2.stu_num JOIN CLASS AS T3 ON T2.class_code   =   T3.class_code JOIN course AS T4 ON T3.crs_code   =   T4.crs_code JOIN department AS T5 ON T5.dept_code   =   T4.dept_code WHERE T5.dept_name   =   'Accounting' INTERSECT SELECT T1.stu_fname FROM student AS T1 JOIN enroll AS T2 ON T1.stu_num   =   T2.stu_num JOIN CLASS AS T3 ON T2.class_code   =   T3.class_code JOIN course AS T4 ON T3.crs_code   =   T4.crs_code JOIN department AS T5 ON T5.dept_code   =   T4.dept_code WHERE T5.dept_name   =   'Computer Info. Systems'"
-        }
-      ],
-      "multi_step": true,
-      "is_complex": true,
-      "original_split_index": 795
-    },
-    "prefix_hints": null,
-    "hint_stats": null
-  },
-  {
     "index": 633,
     "variant": "toxicology",
     "level": "medium",

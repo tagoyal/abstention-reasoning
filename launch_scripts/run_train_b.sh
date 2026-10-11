@@ -43,13 +43,13 @@ fi
 
 
 
-python -m pipeline train_sft \
-  --task "${TASK}" \
-  --method method_b \
-  --run-id "${RUN_ID}" \
-  --base-model models/${BASE_MODEL_DATA_NAME}/baseline_rl/${RUN_ID}/model \
-  --data-name "${DATA_NAME}" \
-  ${STRIP_THINK}
+# python -m pipeline train_sft \
+#   --task "${TASK}" \
+#   --method method_b \
+#   --run-id "${RUN_ID}" \
+#   --base-model models/${BASE_MODEL_DATA_NAME}/baseline_rl/${RUN_ID}/model \
+#   --data-name "${DATA_NAME}" \
+#   ${STRIP_THINK}
 
 python -m pipeline train_rl \
   --task "${TASK}" \

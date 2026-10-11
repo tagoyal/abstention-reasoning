@@ -28758,28 +28758,6 @@
     }
   },
   {
-    "index": 9612,
-    "variant": "mental_health_survey",
-    "level": "extra",
-    "problem": "Database Schema:\nCREATE TABLE `Question` (\n  `questiontext` TEXT,\n  `questionid` INTEGER,\n  PRIMARY KEY (`questionid`)\n);\n\nCREATE TABLE `Survey` (\n  `SurveyID` INTEGER,\n  `Description` TEXT,\n  PRIMARY KEY (`SurveyID`)\n);\n\nCREATE TABLE `Answer` (\n  `AnswerText` TEXT,\n  `SurveyID` INTEGER,\n  `UserID` INTEGER,\n  `QuestionID` INTEGER,\n  PRIMARY KEY (`UserID`, `QuestionID`)\n);\n\nQuestion:\nWhat is the rate of increase of users with a current mental disorder from 2019's survey to 2016's survey?\n\nEvidence:\nrate of increase = subtract(divide(count(SurveyID = 2019& QuestionID = 33& AnswerText = 'Yes'), count(SurveyID = 2019& QuestionID = 33)), divide(count(SurveyID = 2016& QuestionID = 33& AnswerText = 'Yes'), count(SurveyID = 2016& QuestionID = 33)))",
-    "answer": "SELECT CAST(( SELECT COUNT(T2.UserID) FROM Question AS T1 INNER JOIN Answer AS T2 ON T1.questionid = T2.QuestionID WHERE T2.SurveyID = 2019 AND T1.questiontext LIKE 'Do you currently have a mental health disorder?' AND T2.AnswerText = 'Yes' ) - ( SELECT COUNT(T2.UserID) FROM Question AS T1 INNER JOIN Answer AS T2 ON T1.questionid = T2.QuestionID WHERE T2.SurveyID = 2016 AND T1.questiontext LIKE 'Do you currently have a mental health disorder?' AND T2.AnswerText = 'Yes' ) AS REAL) * 100 / ( SELECT COUNT(T2.UserID) FROM Question AS T1 INNER JOIN Answer AS T2 ON T1.questionid = T2.QuestionID WHERE T2.SurveyID = 2016 AND T1.questiontext LIKE 'Do you currently have a mental health disorder?' AND T2.AnswerText = 'Yes' )",
-    "metadata": {
-      "source": "bird",
-      "split": "train",
-      "db_id": "mental_health_survey",
-      "question": "What is the rate of increase of users with a current mental disorder from 2019's survey to 2016's survey?",
-      "evidence": "rate of increase = subtract(divide(count(SurveyID = 2019& QuestionID = 33& AnswerText = 'Yes'), count(SurveyID = 2019& QuestionID = 33)), divide(count(SurveyID = 2016& QuestionID = 33& AnswerText = 'Yes'), count(SurveyID = 2016& QuestionID = 33)))",
-      "difficulty": "extra",
-      "original_difficulty": null,
-      "question_id": 4594,
-      "multi_step": true,
-      "is_complex": true,
-      "original_split_index": 4594
-    },
-    "prefix_hints": null,
-    "hint_stats": null
-  },
-  {
     "index": 3178,
     "variant": "movie_1",
     "level": "medium",
@@ -65755,27 +65733,6 @@
         27.0
       ]
     }
-  },
-  {
-    "index": 3582,
-    "variant": "college_1",
-    "level": "extra",
-    "problem": "Database Schema:\nCREATE TABLE `CLASS` (\n  `CLASS_CODE` TEXT,\n  `CRS_CODE` TEXT REFERENCES `COURSE`(`CRS_CODE`),\n  `CLASS_SECTION` TEXT,\n  `CLASS_TIME` TEXT,\n  `CLASS_ROOM` TEXT,\n  `PROF_NUM` NUMBER REFERENCES `EMPLOYEE`(`EMP_NUM`),\n  PRIMARY KEY (`CLASS_CODE`)\n);\n\nCREATE TABLE `COURSE` (\n  `CRS_CODE` TEXT,\n  `DEPT_CODE` TEXT REFERENCES `DEPARTMENT`(`DEPT_CODE`),\n  `CRS_DESCRIPTION` TEXT,\n  `CRS_CREDIT` NUMBER,\n  PRIMARY KEY (`CRS_CODE`)\n);\n\nCREATE TABLE `DEPARTMENT` (\n  `DEPT_CODE` TEXT,\n  `DEPT_NAME` TEXT,\n  `SCHOOL_CODE` TEXT,\n  `EMP_NUM` NUMBER REFERENCES `EMPLOYEE`(`EMP_NUM`),\n  `DEPT_ADDRESS` TEXT,\n  `DEPT_EXTENSION` TEXT,\n  PRIMARY KEY (`DEPT_CODE`)\n);\n\nCREATE TABLE `EMPLOYEE` (\n  `EMP_NUM` NUMBER,\n  `EMP_LNAME` TEXT,\n  `EMP_FNAME` TEXT,\n  `EMP_INITIAL` TEXT,\n  `EMP_JOBCODE` TEXT,\n  `EMP_HIREDATE` TIME,\n  `EMP_DOB` TIME,\n  PRIMARY KEY (`EMP_NUM`)\n);\n\nCREATE TABLE `ENROLL` (\n  `CLASS_CODE` TEXT REFERENCES `CLASS`(`CLASS_CODE`),\n  `STU_NUM` NUMBER REFERENCES `STUDENT`(`STU_NUM`),\n  `ENROLL_GRADE` TEXT\n);\n\nCREATE TABLE `PROFESSOR` (\n  `EMP_NUM` NUMBER REFERENCES `EMPLOYEE`(`EMP_NUM`),\n  `DEPT_CODE` TEXT REFERENCES `DEPARTMENT`(`DEPT_CODE`),\n  `PROF_OFFICE` TEXT,\n  `PROF_EXTENSION` TEXT,\n  `PROF_HIGH_DEGREE` TEXT\n);\n\nCREATE TABLE `STUDENT` (\n  `STU_NUM` NUMBER,\n  `STU_LNAME` TEXT,\n  `STU_FNAME` TEXT,\n  `STU_INIT` TEXT,\n  `STU_DOB` TIME,\n  `STU_HRS` NUMBER,\n  `STU_CLASS` TEXT,\n  `STU_GPA` NUMBER,\n  `STU_TRANSFER` NUMBER,\n  `DEPT_CODE` TEXT REFERENCES `DEPARTMENT`(`DEPT_CODE`),\n  `STU_PHONE` TEXT,\n  `PROF_NUM` NUMBER,\n  PRIMARY KEY (`STU_NUM`)\n);\n\nQuestion:\nWhat are the first names of all students taking accoutning and Computer Information Systems classes?",
-    "answer": "SELECT T1.stu_fname FROM student AS T1 JOIN enroll AS T2 ON T1.stu_num  =  T2.stu_num JOIN CLASS AS T3 ON T2.class_code  =  T3.class_code JOIN course AS T4 ON T3.crs_code  =  T4.crs_code JOIN department AS T5 ON T5.dept_code  =  T4.dept_code WHERE T5.dept_name  =  'Accounting' INTERSECT SELECT T1.stu_fname FROM student AS T1 JOIN enroll AS T2 ON T1.stu_num  =  T2.stu_num JOIN CLASS AS T3 ON T2.class_code  =  T3.class_code JOIN course AS T4 ON T3.crs_code  =  T4.crs_code JOIN department AS T5 ON T5.dept_code  =  T4.dept_code WHERE T5.dept_name  =  'Computer Info. Systems'",
-    "metadata": {
-      "source": "spider",
-      "split": "train",
-      "db_id": "college_1",
-      "question": "What are the first names of all students taking accoutning and Computer Information Systems classes?",
-      "evidence": null,
-      "difficulty": "extra",
-      "original_difficulty": "extra",
-      "multi_step": true,
-      "is_complex": true,
-      "original_split_index": 3294
-    },
-    "prefix_hints": null,
-    "hint_stats": null
   },
   {
     "index": 15262,
@@ -264838,28 +264795,6 @@
         25.0
       ]
     }
-  },
-  {
-    "index": 1230,
-    "variant": "formula_1_bird",
-    "level": "extra",
-    "problem": "Database Schema:\nCREATE TABLE `circuits` (\n  `circuitId` INTEGER,\n  `circuitRef` TEXT,\n  `name` TEXT,\n  `location` TEXT,\n  `country` TEXT,\n  `lat` REAL,\n  `lng` REAL,\n  `alt` INTEGER,\n  `url` TEXT,\n  PRIMARY KEY (`circuitId`)\n);\n\nCREATE TABLE `constructors` (\n  `constructorId` INTEGER,\n  `constructorRef` TEXT,\n  `name` TEXT,\n  `nationality` TEXT,\n  `url` TEXT,\n  PRIMARY KEY (`constructorId`)\n);\n\nCREATE TABLE `drivers` (\n  `driverId` INTEGER,\n  `driverRef` TEXT,\n  `number` INTEGER,\n  `code` TEXT,\n  `forename` TEXT,\n  `surname` TEXT,\n  `dob` DATE,\n  `nationality` TEXT,\n  `url` TEXT,\n  PRIMARY KEY (`driverId`)\n);\n\nCREATE TABLE `seasons` (\n  `year` INTEGER,\n  `url` TEXT,\n  PRIMARY KEY (`year`)\n);\n\nCREATE TABLE `races` (\n  `raceId` INTEGER,\n  `year` INTEGER REFERENCES `seasons`(`year`),\n  `round` INTEGER,\n  `circuitId` INTEGER REFERENCES `circuits`(`circuitId`),\n  `name` TEXT,\n  `date` DATE,\n  `time` TEXT,\n  `url` TEXT,\n  PRIMARY KEY (`raceId`)\n);\n\nCREATE TABLE `constructorResults` (\n  `constructorResultsId` INTEGER,\n  `raceId` INTEGER REFERENCES `races`(`raceId`),\n  `constructorId` INTEGER REFERENCES `constructors`(`constructorId`),\n  `points` REAL,\n  `status` TEXT,\n  PRIMARY KEY (`constructorResultsId`)\n);\n\nCREATE TABLE `constructorStandings` (\n  `constructorStandingsId` INTEGER,\n  `raceId` INTEGER REFERENCES `races`(`raceId`),\n  `constructorId` INTEGER REFERENCES `constructors`(`constructorId`),\n  `points` REAL,\n  `position` INTEGER,\n  `positionText` TEXT,\n  `wins` INTEGER,\n  PRIMARY KEY (`constructorStandingsId`)\n);\n\nCREATE TABLE `driverStandings` (\n  `driverStandingsId` INTEGER,\n  `raceId` INTEGER REFERENCES `races`(`raceId`),\n  `driverId` INTEGER REFERENCES `drivers`(`driverId`),\n  `points` REAL,\n  `position` INTEGER,\n  `positionText` TEXT,\n  `wins` INTEGER,\n  PRIMARY KEY (`driverStandingsId`)\n);\n\nCREATE TABLE `lapTimes` (\n  `raceId` INTEGER REFERENCES `races`(`raceId`),\n  `driverId` INTEGER REFERENCES `drivers`(`driverId`),\n  `lap` INTEGER,\n  `position` INTEGER,\n  `time` TEXT,\n  `milliseconds` INTEGER,\n  PRIMARY KEY (`raceId`, `driverId`, `lap`)\n);\n\nCREATE TABLE `pitStops` (\n  `raceId` INTEGER REFERENCES `races`(`raceId`),\n  `driverId` INTEGER REFERENCES `drivers`(`driverId`),\n  `stop` INTEGER,\n  `lap` INTEGER,\n  `time` TEXT,\n  `duration` TEXT,\n  `milliseconds` INTEGER,\n  PRIMARY KEY (`raceId`, `driverId`, `stop`)\n);\n\nCREATE TABLE `qualifying` (\n  `qualifyId` INTEGER,\n  `raceId` INTEGER REFERENCES `races`(`raceId`),\n  `driverId` INTEGER REFERENCES `drivers`(`driverId`),\n  `constructorId` INTEGER REFERENCES `constructors`(`constructorId`),\n  `number` INTEGER,\n  `position` INTEGER,\n  `q1` TEXT,\n  `q2` TEXT,\n  `q3` TEXT,\n  PRIMARY KEY (`qualifyId`)\n);\n\nCREATE TABLE `status` (\n  `statusId` INTEGER,\n  `status` TEXT,\n  PRIMARY KEY (`statusId`)\n);\n\nCREATE TABLE `results` (\n  `resultId` INTEGER,\n  `raceId` INTEGER REFERENCES `races`(`raceId`),\n  `driverId` INTEGER REFERENCES `drivers`(`driverId`),\n  `constructorId` INTEGER REFERENCES `constructors`(`constructorId`),\n  `number` INTEGER,\n  `grid` INTEGER,\n  `position` INTEGER,\n  `positionText` TEXT,\n  `positionOrder` INTEGER,\n  `points` REAL,\n  `laps` INTEGER,\n  `time` TEXT,\n  `milliseconds` INTEGER,\n  `fastestLap` INTEGER,\n  `rank` INTEGER,\n  `fastestLapTime` TEXT,\n  `fastestLapSpeed` TEXT,\n  `statusId` INTEGER REFERENCES `status`(`statusId`),\n  PRIMARY KEY (`resultId`)\n);\n\nQuestion:\nWhich top 20 driver created the shortest lap time ever record in a Formula_1 race? Please give them full names.\n\nEvidence:\nshortest lap time refers to MIN(time); the time format for the shortest lap time is 'MM:SS.mmm' or 'M:SS.mmm'; full name of the driver refers to forename, surname",
-    "answer": "WITH lap_times_in_seconds AS (SELECT driverId, (CASE WHEN SUBSTR(time, 1, INSTR(time, ':') - 1) <> '' THEN CAST(SUBSTR(time, 1, INSTR(time, ':') - 1) AS REAL) * 60 ELSE 0 END + CASE WHEN SUBSTR(time, INSTR(time, ':') + 1, INSTR(time, '.') - INSTR(time, ':') - 1) <> '' THEN CAST(SUBSTR(time, INSTR(time, ':') + 1, INSTR(time, '.') - INSTR(time, ':') - 1) AS REAL) ELSE 0 END + CASE WHEN SUBSTR(time, INSTR(time, '.') + 1) <> '' THEN CAST(SUBSTR(time, INSTR(time, '.') + 1) AS REAL) / 1000 ELSE 0 END) AS time_in_seconds FROM lapTimes) SELECT T2.forename, T2.surname, T1.driverId FROM (SELECT driverId, MIN(time_in_seconds) AS min_time_in_seconds FROM lap_times_in_seconds GROUP BY driverId) AS T1 INNER JOIN drivers AS T2 ON T1.driverId = T2.driverId ORDER BY T1.min_time_in_seconds ASC LIMIT 20",
-    "metadata": {
-      "source": "bird",
-      "split": "dev",
-      "db_id": "formula_1_bird",
-      "question": "Which top 20 driver created the shortest lap time ever record in a Formula_1 race? Please give them full names.",
-      "evidence": "shortest lap time refers to MIN(time); the time format for the shortest lap time is 'MM:SS.mmm' or 'M:SS.mmm'; full name of the driver refers to forename, surname",
-      "difficulty": "extra",
-      "original_difficulty": "challenging",
-      "question_id": 1011,
-      "multi_step": true,
-      "is_complex": true,
-      "original_split_index": 1011
-    },
-    "prefix_hints": null,
-    "hint_stats": null
   },
   {
     "index": 8179,
