@@ -191,9 +191,91 @@ Return ONLY a JSON object with exactly 5 keys `hint_1`, `hint_2`, `hint_3`, `hin
 {"hint_1": "...", "hint_2": "...", "hint_3": "...", "hint_4": "...", "hint_5": "..."}
 """
 
+PARTIAL_SOLS_SYSTEM_PROMPT = """\
+You are a SQL author solving a Text-to-SQL problem out loud, writing the query as you reason through it. Your task: given the database schema, question (and optional evidence), along with the target SQL answer, write out the derivation as a continuous first-person reasoning trace, then split that trace into exactly 5 sequential segments (sol_1 to sol_5).
+
+## Core Philosophy:
+Drawing a direct parallel with mathematical problem solving, each segment should read as an actual step of writing the query — the explanation plus the exact SQL fragment it produces — not as an instruction telling a student what to do. Crucially, each SQL fragment is CUMULATIVE: it is the entire query built so far, not an isolated clause. So a model given sol_1..sol_k must be able to continue writing sol_(k+1) directly, extending the same SQL string.
+
+## What You Must Do
+
+1. **Write the query directly, in first person**: state each step the way you'd actually write it while solving live ("I join...", "This gives...", "Now I filter...", "Putting this together..."), including the concrete SQL fragment, not a description of the step ("Use X because Y").
+
+2. **Generate 5 segments** where:
+   - **sol_1**: Opens the derivation (identifies the relevant table(s) and writes the first fragment of the query).
+   - **sol_2**: Extends sol_1's fragment with the next piece, continuing directly from its result.
+   - **sol_3**: Extends sol_2's fragment.
+   - **sol_4**: Extends sol_3's fragment.
+   - **sol_5**: Finishes the derivation with the complete, final query.
+
+   At runtime, the final SQL fragment in sol_5 is the full target answer; each prior segment's fragment is a cumulative prefix (in construction order, not necessarily keyword order) of that same query.
+
+## Critical Rules
+
+1. **Fragments are cumulative, not isolated**: each segment's SQL snippet must contain everything built in previous segments plus its new addition (e.g. if sol_2's fragment is `FROM a JOIN b ON ...`, sol_3's fragment is `FROM a JOIN b ON ... WHERE ...`, not just `WHERE ...` on its own).
+
+2. **Each segment explains and extends**: pair a short first-person explanation of the reasoning (which entities relate, what condition is needed, what's being aggregated) with the exact accompanying cumulative SQL fragment in backticks, using the exact table names, column names, aliases, and SQL dialect functions from the target answer.
+
+3. **No repetition of explanation**: each segment's prose picks up from where the previous one left off; don't re-explain earlier steps, just state the new reasoning and the new cumulative fragment.
+
+4. **Match the query's actual complexity**: if the target query only has 2-3 real construction steps, keep segments correspondingly short and some can simply confirm the query is already complete, rather than inventing busywork to fill 5 distinct segments. Never split one atomic step into multiple segments just to reach 5.
+
+5. **First-person, no meta-commentary**: write as the query author, not as a tutor. Do not use instructive or pedagogical phrasing ("use the X table because...", "apply a filter...", "project the columns..."); just do the step ("I use X because...", "I filter on...", "I project...").
+
+6. **Constructive only**: never include negative statements like "no joins needed" or "do not filter".
+
+## Example 1 (Multi-Table Join & Filtering)
+
+**Question:** What are the names of car makers who produced cars in 1970?
+**Target SQL:** `SELECT DISTINCT T1.Maker FROM CAR_MAKERS AS T1 JOIN MODEL_LIST AS T2 ON T1.Id = T2.Maker JOIN CAR_NAMES AS T3 ON T2.model = T3.model JOIN CARS_DATA AS T4 ON T3.MakeId = T4.id WHERE T4.year = '1970';`
+
+**Output:**
+{
+  "sol_1": "Maker names and production years live in different tables, so I start by linking `CAR_MAKERS` to `MODEL_LIST` on the maker id: `FROM CAR_MAKERS AS T1 JOIN MODEL_LIST AS T2 ON T1.Id = T2.Maker`.",
+  "sol_2": "I continue the join chain through model names into the production data so each car's year becomes available: `FROM CAR_MAKERS AS T1 JOIN MODEL_LIST AS T2 ON T1.Id = T2.Maker JOIN CAR_NAMES AS T3 ON T2.model = T3.model JOIN CARS_DATA AS T4 ON T3.MakeId = T4.id`.",
+  "sol_3": "Now I restrict to cars produced in 1970: `FROM CAR_MAKERS AS T1 JOIN MODEL_LIST AS T2 ON T1.Id = T2.Maker JOIN CAR_NAMES AS T3 ON T2.model = T3.model JOIN CARS_DATA AS T4 ON T3.MakeId = T4.id WHERE T4.year = '1970'`.",
+  "sol_4": "A maker can have several 1970 models, so I project maker names with DISTINCT to avoid duplicates: `SELECT DISTINCT T1.Maker FROM CAR_MAKERS AS T1 JOIN MODEL_LIST AS T2 ON T1.Id = T2.Maker JOIN CAR_NAMES AS T3 ON T2.model = T3.model JOIN CARS_DATA AS T4 ON T3.MakeId = T4.id WHERE T4.year = '1970'`.",
+  "sol_5": "This is already the complete query: `SELECT DISTINCT T1.Maker FROM CAR_MAKERS AS T1 JOIN MODEL_LIST AS T2 ON T1.Id = T2.Maker JOIN CAR_NAMES AS T3 ON T2.model = T3.model JOIN CARS_DATA AS T4 ON T3.MakeId = T4.id WHERE T4.year = '1970'`."
+}
+
+## Example 2 (Aggregations, Ratios & Calculations)
+
+**Question:** What percentage of clients who opened their accounts in districts with an average salary over 10000 are women?
+**Evidence:** Female refers to gender = 'F'; Average salary is in column A11
+**Target SQL:** `SELECT CAST(SUM(T2.gender = 'F') AS REAL) * 100 / COUNT(T2.client_id) FROM district AS T1 INNER JOIN client AS T2 ON T1.district_id = T2.district_id WHERE T1.A11 > 10000`
+
+**Output:**
+{
+  "sol_1": "Client demographics and district salary figures are in separate tables, so I join them on the shared district id: `FROM district AS T1 INNER JOIN client AS T2 ON T1.district_id = T2.district_id`.",
+  "sol_2": "I keep only the high-salary districts where A11 exceeds 10000: `FROM district AS T1 INNER JOIN client AS T2 ON T1.district_id = T2.district_id WHERE T1.A11 > 10000`.",
+  "sol_3": "For the percentage I need a count of female clients, which I compute with a conditional sum: `SUM(T2.gender = 'F')`.",
+  "sol_4": "I also need the total matched client count as the denominator: `COUNT(T2.client_id)`.",
+  "sol_5": "Putting these together and casting the numerator to REAL to avoid integer division, the full query is: `SELECT CAST(SUM(T2.gender = 'F') AS REAL) * 100 / COUNT(T2.client_id) FROM district AS T1 INNER JOIN client AS T2 ON T1.district_id = T2.district_id WHERE T1.A11 > 10000`."
+}
+
+## Example 3 (Subqueries & Nested Aggregation)
+
+**Question:** Find the names of all courses that have enrolled more students than the average course enrollment.
+**Target SQL:** `SELECT T1.course_name FROM courses AS T1 JOIN enrollments AS T2 ON T1.course_id = T2.course_id GROUP BY T1.course_id HAVING count(T2.student_id) > (SELECT avg(c) FROM (SELECT count(student_id) AS c FROM enrollments GROUP BY course_id))`
+
+**Output:**
+{
+  "sol_1": "To find the average enrollment I first need the per-course enrollment counts, via an inner subquery: `SELECT count(student_id) AS c FROM enrollments GROUP BY course_id`.",
+  "sol_2": "Averaging those gives the benchmark I'll compare each course against: `SELECT avg(c) FROM (SELECT count(student_id) AS c FROM enrollments GROUP BY course_id)`.",
+  "sol_3": "For the outer query, I join courses to enrollments and group by course so I can count enrollments per course again: `FROM courses AS T1 JOIN enrollments AS T2 ON T1.course_id = T2.course_id GROUP BY T1.course_id`.",
+  "sol_4": "I keep only the course groups whose enrollment count exceeds the benchmark average: `FROM courses AS T1 JOIN enrollments AS T2 ON T1.course_id = T2.course_id GROUP BY T1.course_id HAVING count(T2.student_id) > (SELECT avg(c) FROM (SELECT count(student_id) AS c FROM enrollments GROUP BY course_id))`.",
+  "sol_5": "Finally, I project the course names for the qualifying groups: `SELECT T1.course_name FROM courses AS T1 JOIN enrollments AS T2 ON T1.course_id = T2.course_id GROUP BY T1.course_id HAVING count(T2.student_id) > (SELECT avg(c) FROM (SELECT count(student_id) AS c FROM enrollments GROUP BY course_id))`."
+}
+
+## Output Format:
+Return ONLY a JSON object with exactly 5 keys `sol_1`, `sol_2`, `sol_3`, `sol_4`, `sol_5` (no markdown code blocks):
+{"sol_1": "...", "sol_2": "...", "sol_3": "...", "sol_4": "...", "sol_5": "..."}
+"""
+
 SYSTEM_PROMPTS = {
     "conceptual": CONCEPTUAL_HINTS_SYSTEM_PROMPT,
     "partial_sql": PARTIAL_SQL_HINTS_SYSTEM_PROMPT,
+    "partial_sols": PARTIAL_SOLS_SYSTEM_PROMPT,
 }
 
 CONCEPTUAL_USER_TEMPLATE = """\
@@ -215,9 +297,28 @@ Target SQL Answer:
 Break down the path to construct this SQL query into exactly 5 sequential, independent steps (hint_1, hint_2, hint_3, hint_4, hint_5).
 Each step must contain a clear 1-2 sentence explanation of the reasoning paired with the exact accompanying partial SQL snippet/clause that implements that step:"""
 
+PARTIAL_SOLS_USER_TEMPLATE = """\
+Problem (Schema & Question):
+{problem}
+
+Target SQL Answer:
+{answer}
+{metadata_context}
+Write out the construction of this SQL query as a continuous first-person reasoning trace, then split it into exactly 5 sequential segments (sol_1, sol_2, sol_3, sol_4, sol_5). Each segment's SQL fragment must be cumulative (the full query built so far), ending with sol_5 containing the complete target query:"""
+
 USER_TEMPLATES = {
     "conceptual": CONCEPTUAL_USER_TEMPLATE,
     "partial_sql": PARTIAL_SQL_USER_TEMPLATE,
+    "partial_sols": PARTIAL_SOLS_USER_TEMPLATE,
+}
+
+
+# Keys the model is asked to return per style. Output is normalized to
+# hint_1..hint_5 in parse_hints_response.
+KEY_PREFIXES = {
+    "conceptual": "hint",
+    "partial_sql": "hint",
+    "partial_sols": "sol",
 }
 
 
@@ -237,6 +338,7 @@ def detect_repetition(text: str, min_pattern_len: int = 2, min_repeats: int = 10
 
 def validate_hints(
     hints: dict,
+    key_prefix: str = "hint",
     max_tokens_per_hint: int = 250,
     max_total_tokens: int = 650,
 ) -> tuple[bool, str]:
@@ -245,7 +347,7 @@ def validate_hints(
     if num_hints != 5:
         return False, f"Expected exactly 5 hints, got {num_hints}"
 
-    expected_keys = [f"hint_{i}" for i in range(1, 6)]
+    expected_keys = [f"{key_prefix}_{i}" for i in range(1, 6)]
     if set(hints.keys()) != set(expected_keys):
         return False, f"Keys {list(hints.keys())} do not match expected sequence {expected_keys}"
 
@@ -267,7 +369,7 @@ def validate_hints(
     return True, ""
 
 
-def parse_hints_response(content: str) -> dict | None:
+def parse_hints_response(content: str, key_prefix: str = "hint") -> dict | None:
     """Parse JSON hints from LLM response."""
     if not content:
         return None
@@ -287,10 +389,12 @@ def parse_hints_response(content: str) -> dict | None:
         content = "\n".join(json_lines)
     try:
         hints = json.loads(content)
-        is_valid, _ = validate_hints(hints)
+        is_valid, _ = validate_hints(hints, key_prefix=key_prefix)
         if not is_valid:
             return None
-        return hints
+        # The model may answer with style-specific keys (e.g. sol_1..sol_5);
+        # always store them as hint_1..hint_5 so the output schema is identical.
+        return {f"hint_{i}": hints[f"{key_prefix}_{i}"] for i in range(1, 6)}
     except Exception:
         return None
 
@@ -351,6 +455,7 @@ async def generate_prefix_hints(
     meta_context = format_metadata_context(metadata)
     system_prompt = SYSTEM_PROMPTS.get(hint_style, CONCEPTUAL_HINTS_SYSTEM_PROMPT)
     user_template = USER_TEMPLATES.get(hint_style, CONCEPTUAL_USER_TEMPLATE)
+    key_prefix = KEY_PREFIXES.get(hint_style, "hint")
     user_content = user_template.format(
         problem=problem,
         answer=answer,
@@ -371,7 +476,7 @@ async def generate_prefix_hints(
                     response_format={"type": "json_object"},
                 )
                 content = response.choices[0].message.content
-                hints = parse_hints_response(content)
+                hints = parse_hints_response(content, key_prefix=key_prefix)
                 if hints is None:
                     attempt += 1
                     if attempt < max_retries:
@@ -575,8 +680,12 @@ def main():
         "--hint-style",
         type=str,
         default="conceptual",
-        choices=["conceptual", "partial_sql"],
-        help="Prompt style: 'conceptual' (strategy and natural reasoning) or 'partial_sql' (reasoning paired with concrete partial SQL code)",
+        choices=["conceptual", "partial_sql", "partial_sols"],
+        help=(
+            "Prompt style: 'conceptual' (strategy and natural reasoning), "
+            "'partial_sql' (reasoning paired with concrete but non-cumulative partial SQL code), "
+            "or 'partial_sols' (first-person reasoning with cumulative partial SQL, like a partial solution being written live)"
+        ),
     )
     parser.add_argument(
         "--filter",

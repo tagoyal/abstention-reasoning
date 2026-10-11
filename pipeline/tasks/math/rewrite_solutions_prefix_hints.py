@@ -21,15 +21,26 @@ Usage:
 import argparse
 import asyncio
 import json
-import os
 import re
 from pathlib import Path
 
 import tiktoken
-from openai import AsyncOpenAI, RateLimitError
+from azure.identity import (
+    AzureCliCredential,
+    ChainedTokenCredential,
+    ManagedIdentityCredential,
+    get_bearer_token_provider,
+)
+from openai import AsyncAzureOpenAI, RateLimitError
 from tqdm.asyncio import tqdm_asyncio
 
-from pipeline.core.method import ARTIFACTS_ROOT
+from pipeline.core.method import DATA_ROOT
+
+# TRAPI configuration
+TRAPI_SCOPE = "api://trapi/.default"
+TRAPI_API_VERSION = "2024-10-21"
+TRAPI_INSTANCE = "redmond/interactive"
+TRAPI_ENDPOINT = f"https://trapi.research.microsoft.com/{TRAPI_INSTANCE}"
 
 # Initialize tokenizer (cl100k_base is used by GPT-4, GPT-3.5-turbo, and text-embedding-ada-002)
 _ENCODING = tiktoken.get_encoding("cl100k_base")
@@ -130,6 +141,113 @@ Solution:
 
 Break this solution into 5 sequential steps (1-2 sentences each). Each hint should be INDEPENDENT (not repeating previous hints):"""
 
+PREFIX_SOLS_USER_TEMPLATE = """\
+Problem:
+{problem}
+
+Solution:
+{solution}
+
+Write the derivation as 5 consecutive first-person segments (sol_1 .. sol_5), each continuing exactly where the previous one left off:"""
+
+
+
+PREFIX_SOLS_SYSTEM_PROMPT = """\
+You are a mathematician solving a problem out loud, writing your derivation as you go. Your task: given a problem and its solution, write out the derivation as a single continuous first-person reasoning trace (computations, substitutions, derived equations), then split that trace into exactly 5 sequential segments.
+
+## What You Must Do
+
+1. **Write the derivation directly**: state each step the way you would while actually solving it live — the concrete equation, substitution, or computed value — not a description of the step.
+
+2. **Generate 5 segments** where:
+   - **sol_1**: Opens the derivation (sets up notation / writes the first relation).
+   - **sol_2**: Performs the next computation, continuing directly from sol_1's result.
+   - **sol_3**: Continues directly from sol_2's result.
+   - **sol_4**: Continues directly from sol_3's result.
+   - **sol_5**: Finishes the derivation, completing the final computation.
+
+   At runtime, segments are concatenated verbatim (sol_1 + sol_2 + ... + sol_5) to reproduce the full solution, so a model given sol_1..sol_k must be able to continue writing sol_(k+1) directly, picking up mid-equation if needed.
+
+## Critical Rules
+
+1. **Each segment continues the math, not just names it**: write the actual equation/number produced at each step (e.g. "so $a^2 - ab + b^2 = 13$"), not a pointer to a method (e.g. "apply the identity").
+
+2. **No repetition**: each segment starts exactly where the previous segment's math left off. Do not restate earlier equations or results.
+
+3. **1-3 sentences per segment**: keep segments short, but include the actual algebra/arithmetic performed, not just the name of the technique.
+
+4. **Match the solution's actual length and difficulty**: if the original solution is short or only has 2-3 real steps, make the segments correspondingly short (even a single clause or short phrase) rather than padding, repeating, or inventing busywork to fill out 5 segments. It is fine for some segments to be very brief if that's all the step requires. Never split a single atomic step into multiple segments just to reach 5.
+
+5. **First-person, no meta-commentary**: write as the solver, not as a tutor. Do not use instructive or pedagogical phrasing ("recall that...", "note that...", "apply the formula...", "we should use..."); just do the step.
+
+6. **Use LaTeX**: Use proper LaTeX notation ($...$) for all math. Do NOT use Unicode math symbols.
+
+## Example 1
+
+**Problem:** Two reals $a$ and $b$ are such that $a+b=7$ and $a^3+b^3=91$. Compute $ab$.
+
+**Solution:** We have $91=a^3+b^3=(a+b)(a^2-ab+b^2)=(a+b)((a+b)^2-3ab)=7\\cdot(49-3ab)$, from which $ab=12$.
+
+**Output:**
+{
+  "sol_1": "We have $91 = a^3 + b^3 = (a+b)(a^2 - ab + b^2)$.",
+  "sol_2": "Since $a+b=7$, this becomes $91 = 7(a^2 - ab + b^2)$, so $a^2 - ab + b^2 = 13$.",
+  "sol_3": "Now, $(a+b)^2 = a^2 + 2ab + b^2 = 49$, so $a^2 + b^2 = 49 - 2ab$.",
+  "sol_4": "Substituting, $13 = a^2 - ab + b^2 = (49 - 2ab) - ab = 49 - 3ab$.",
+  "sol_5": "So $3ab = 49 - 13 = 36$, giving $ab = 12$."
+}
+
+## Example 2
+
+**Problem:** Let $a$ and $b$ be nonzero real numbers. Find the minimum value of $a^2 + b^2 + \\frac{1}{a^2} + \\frac{b}{a}$.
+
+**Solution:** We complete the square with respect to $b^2$ and $\\frac{b}{a}$ to get $b^2 + \\frac{b}{a} = (b + \\frac{1}{2a})^2 - \\frac{1}{4a^2}$. This is minimized when $b = -\\frac{1}{2a}$. The problem becomes minimizing $a^2 + \\frac{1}{a^2} - \\frac{1}{4a^2} = a^2 + \\frac{3}{4a^2}$. By AM-GM, $a^2 + \\frac{3}{4a^2} \\geq 2\\sqrt{\\frac{3}{4}} = \\sqrt{3}$. Equality when $a = \\sqrt[4]{\\frac{3}{4}}$.
+
+**Output:**
+{
+  "sol_1": "Let's isolate the $b$ terms: $b^2 + \\frac{b}{a} = \\left(b + \\frac{1}{2a}\\right)^2 - \\frac{1}{4a^2}$.",
+  "sol_2": "This is minimized over $b$ when $b = -\\frac{1}{2a}$, leaving $a^2 + \\frac{1}{a^2} - \\frac{1}{4a^2}$.",
+  "sol_3": "Simplifying, this is $a^2 + \\frac{3}{4a^2}$, which we now minimize over $a$.",
+  "sol_4": "By AM-GM, $a^2 + \\frac{3}{4a^2} \\geq 2\\sqrt{a^2 \\cdot \\frac{3}{4a^2}} = 2\\sqrt{\\frac{3}{4}}$.",
+  "sol_5": "Equality holds when $a^2 = \\frac{3}{4a^2}$, i.e. $a = \\sqrt[4]{3/4}$, giving a minimum value of $\\sqrt{3}$."
+}
+
+## Example 3 (Number Theory)
+
+**Problem:** A very large number $x$ is equal to $2^2 3^3 4^4 5^5 6^6 7^7 8^8 9^9$. What is the smallest positive integer that, when multiplied with $x$, produces a perfect square?
+
+**Output:**
+{
+  "sol_1": "For $nx$ to be a perfect square, every prime in its factorization must appear with an even exponent.",
+  "sol_2": "Rewriting composite bases as prime powers: $4^4 = 2^8$, $6^6 = 2^6 3^6$, $8^8 = 2^{24}$, $9^9 = 3^{18}$.",
+  "sol_3": "Collecting exponents by prime: the exponent of $2$ is $2+8+6+24=40$, and the exponent of $3$ is $3+6+18=27$.",
+  "sol_4": "The exponent of $5$ is $5$ and the exponent of $7$ is $7$, so the odd exponents are on $3^{27}$, $5^5$, and $7^7$.",
+  "sol_5": "To fix these, we multiply by $3 \\cdot 5 \\cdot 7 = 105$."
+}
+
+## Output Format
+
+Return ONLY a JSON object with this exact structure (no markdown code blocks):
+{"sol_1": "...", "sol_2": "...", "sol_3": "...", "sol_4": "...", "sol_5": "..."}
+"""
+
+
+# hint_type -> (system prompt, user template, key prefix in the model's JSON response, validation limits)
+HINT_TYPES = {
+    "hints": {
+        "system": PREFIX_HINTS_SYSTEM_PROMPT,
+        "user": PREFIX_HINTS_USER_TEMPLATE,
+        "key": "hint",
+        "limits": dict(max_tokens_per_hint=200, max_total_tokens=500, min_tokens=3),
+    },
+    "sols": {
+        "system": PREFIX_SOLS_SYSTEM_PROMPT,
+        "user": PREFIX_SOLS_USER_TEMPLATE,
+        "key": "sol",
+        "limits": dict(max_tokens_per_hint=300, max_total_tokens=800, min_tokens=3),
+    },
+}
+
 
 def detect_repetition(text: str, min_pattern_len: int = 2, min_repeats: int = 10) -> bool:
     """Detect if text contains excessive repetition (sign of model breakdown)."""
@@ -150,11 +268,12 @@ def validate_hints(
     hints: dict,
     max_tokens_per_hint: int = 200,
     max_total_tokens: int = 500,
+    min_tokens: int = 3,
 ) -> tuple[bool, str]:
     """Validate hints for quality issues. Returns (is_valid, error_message)."""
     total_tokens = 0
 
-    for i in range(1, 7):
+    for i in range(1, 6):
         key = f"hint_{i}"
         hint = hints[key]
 
@@ -170,7 +289,7 @@ def validate_hints(
             return False, f"{key} too long ({tokens} tokens > {max_tokens_per_hint})"
 
         # Check for too short (likely incomplete)
-        if tokens < 3:
+        if tokens < min_tokens:
             return False, f"{key} too short ({tokens} tokens)"
 
     # Check total length
@@ -180,8 +299,14 @@ def validate_hints(
     return True, ""
 
 
-def parse_hints_response(content: str) -> dict | None:
-    """Parse the JSON hints from GPT response."""
+def parse_hints_response(content: str, hint_type: str = "hints") -> dict | None:
+    """Parse the JSON hints from GPT response.
+
+    Always returns keys hint_1..hint_5; for hint_type="sols" the response's
+    sol_1..sol_5 are renamed so the output structure is identical.
+    """
+    cfg = HINT_TYPES[hint_type]
+    key = cfg["key"]
     if not content:
         return None
 
@@ -204,13 +329,14 @@ def parse_hints_response(content: str) -> dict | None:
 
     try:
         hints = json.loads(content)
-        required_keys = {"hint_1", "hint_2", "hint_3", "hint_4", "hint_5"}
+        required_keys = {f"{key}_{i}" for i in range(1, 6)}
         if not required_keys.issubset(hints.keys()):
             print(f"  Warning: Missing keys in response. Got: {hints.keys()}")
             return None
+        hints = {f"hint_{i}": hints[f"{key}_{i}"] for i in range(1, 6)}
 
         # Validate hint quality
-        is_valid, error = validate_hints(hints)
+        is_valid, error = validate_hints(hints, **cfg["limits"])
         if not is_valid:
             print(f"  Warning: Invalid hints - {error}")
             return None
@@ -224,7 +350,7 @@ def parse_hints_response(content: str) -> dict | None:
 
 def validate_hint_structure(hints: dict) -> dict:
     """Compute stats for incremental hints (in tokens)."""
-    tokens = [count_tokens(hints[f"hint_{i}"]) for i in range(1, 7)]
+    tokens = [count_tokens(hints[f"hint_{i}"]) for i in range(1, 6)]
     total = sum(tokens)
     return {
         "tokens": tokens,  # Token counts per hint
@@ -247,16 +373,18 @@ def parse_rate_limit_delay(error_message: str) -> float:
 
 
 async def generate_prefix_hints(
-    client: AsyncOpenAI,
+    client: AsyncAzureOpenAI,
     problem: str,
     solution: str,
-    model: str = "gpt-5-mini-2025-08-07",
+    model: str = "gpt-5.6-sol_2026-07-09",
     max_retries: int = 5,
     semaphore: asyncio.Semaphore | None = None,
     verbose: bool = False,
+    hint_type: str = "hints",
 ) -> dict | None:
     """Generate prefix hints for a single problem (async)."""
-    user_content = PREFIX_HINTS_USER_TEMPLATE.format(problem=problem, solution=solution)
+    cfg = HINT_TYPES[hint_type]
+    user_content = cfg["user"].format(problem=problem, solution=solution)
 
     async def _call():
         attempt = 0
@@ -265,7 +393,7 @@ async def generate_prefix_hints(
                 response = await client.chat.completions.create(
                     model=model,
                     messages=[
-                        {"role": "system", "content": PREFIX_HINTS_SYSTEM_PROMPT},
+                        {"role": "system", "content": cfg["system"]},
                         {"role": "user", "content": user_content},
                     ],
                     max_completion_tokens=8192,
@@ -275,7 +403,7 @@ async def generate_prefix_hints(
                 finish_reason = response.choices[0].finish_reason
                 if verbose or not content:
                     print(f"  Response: content={repr(content)[:100]}, finish_reason={finish_reason}")
-                hints = parse_hints_response(content)
+                hints = parse_hints_response(content, hint_type)
                 if hints is None:
                     print(f"  Parse failed (attempt {attempt + 1})")
                     attempt += 1
@@ -305,11 +433,12 @@ async def generate_prefix_hints(
 
 
 async def process_primitive(
-    client: AsyncOpenAI,
+    client: AsyncAzureOpenAI,
     primitive: dict,
     model: str,
     semaphore: asyncio.Semaphore,
     verbose: bool = False,
+    hint_type: str = "hints",
 ) -> dict:
     """Process a single primitive: generate prefix hints."""
     solution = primitive.get("solution_original", primitive.get("solution", ""))
@@ -321,6 +450,7 @@ async def process_primitive(
         model=model,
         semaphore=semaphore,
         verbose=verbose,
+        hint_type=hint_type,
     )
 
     new_p = primitive.copy()
@@ -401,16 +531,17 @@ class IncrementalSaver:
 
 
 async def process_and_save(
-    client: AsyncOpenAI,
+    client: AsyncAzureOpenAI,
     primitive: dict,
     model: str,
     semaphore: asyncio.Semaphore,
     saver: IncrementalSaver,
     failed_queue: asyncio.Queue,
     verbose: bool = False,
+    hint_type: str = "hints",
 ) -> None:
     """Process a single primitive and save immediately. Requeue on failure."""
-    result = await process_primitive(client, primitive, model, semaphore, verbose)
+    result = await process_primitive(client, primitive, model, semaphore, verbose, hint_type)
     if result.get("prefix_hints") is None:
         # Failed - add to retry queue (don't save yet)
         await failed_queue.put(primitive)
@@ -421,13 +552,14 @@ async def process_and_save(
 async def generate_all_prefix_hints(
     input_path: Path,
     output_path: Path,
-    model: str = "gpt-5-mini-2025-08-07",
+    model: str = "gpt-5.6-sol_2026-07-09",
     max_samples: int | None = None,
     batch_size: int = 20,
     save_every: int = 30,
     max_retries: int = 3,
     resume: bool = True,
     verbose: bool = False,
+    hint_type: str = "hints",
 ) -> None:
     """Generate prefix hints for all problems (async with incremental saving)."""
     # Load input
@@ -461,8 +593,16 @@ async def generate_all_prefix_hints(
         print("Nothing to do!")
         return
 
-    # Initialize async client
-    client = AsyncOpenAI()
+    # Initialize async TRAPI client
+    credential = get_bearer_token_provider(
+        ChainedTokenCredential(AzureCliCredential(), ManagedIdentityCredential()),
+        TRAPI_SCOPE,
+    )
+    client = AsyncAzureOpenAI(
+        azure_endpoint=TRAPI_ENDPOINT,
+        azure_ad_token_provider=credential,
+        api_version=TRAPI_API_VERSION,
+    )
     semaphore = asyncio.Semaphore(batch_size)
 
     # Process with retry loop
@@ -476,7 +616,7 @@ async def generate_all_prefix_hints(
 
         # Process all items in current batch
         tasks = [
-            process_and_save(client, p, model, semaphore, saver, failed_queue, verbose)
+            process_and_save(client, p, model, semaphore, saver, failed_queue, verbose, hint_type)
             for p in current_batch
         ]
 
@@ -540,20 +680,20 @@ def main():
     parser.add_argument(
         "--input", "-i",
         type=Path,
-        default=ARTIFACTS_ROOT / "math" / "primitives.json",
+        default=DATA_ROOT / "math_o1" / "problems" / "primitives.json",
         help="Input primitives file",
     )
     parser.add_argument(
         "--output", "-o",
         type=Path,
-        default=ARTIFACTS_ROOT / "math" / "primitives_prefix_hints.json",
+        default=DATA_ROOT / "math_o1" / "problems" / "primitives_prefix_hints.json",
         help="Output file with prefix hints",
     )
     parser.add_argument(
         "--model", "-m",
         type=str,
-        default="gpt-5-mini-2025-08-07",
-        help="OpenAI model to use (default: gpt-5-mini-2025-08-07)",
+        default="gpt-5.6-sol_2026-07-09",
+        help="TRAPI model name (default: gpt-5.6-sol_2026-07-09)",
     )
     parser.add_argument(
         "--batch-size", "-b",
@@ -585,16 +725,19 @@ def main():
         help="Don't resume from existing output file",
     )
     parser.add_argument(
+        "--hint-type",
+        choices=list(HINT_TYPES),
+        default="hints",
+        help="'hints': tutor-style step descriptions (default); "
+        "'sols': first-person derivation segments. Output keys are hint_1..hint_5 either way.",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Print verbose debug output",
     )
 
     args = parser.parse_args()
-
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("Error: OPENAI_API_KEY environment variable not set")
-        return
 
     asyncio.run(generate_all_prefix_hints(
         input_path=args.input,
@@ -606,6 +749,7 @@ def main():
         max_retries=args.max_retries,
         resume=not args.no_resume,
         verbose=args.verbose,
+        hint_type=args.hint_type,
     ))
 
 

@@ -341,11 +341,16 @@ def _create_prompts_single(
 
     is_parquet = fmt == "parquet"
 
-    # Eval emits up to num_hints + 1 records per problem, so its record-index
-    # stride must be wide enough that indices stay unique.
+    # Eval and every rl_* split cover every hint level (0..num_hints) per
+    # problem, rather than sampling HINT_LEVELS_PER_PROBLEM of them.
+    uses_all_hint_levels = split_name == "eval" or "rl_" in split_name
+
+    # Splits that cover every hint level emit up to num_hints + 1 records per
+    # problem, so their record-index stride must be wide enough that indices
+    # stay unique.
     index_stride = (
         num_hints + 1
-        if uses_fixed_hint_levels and split_name == "eval"
+        if uses_fixed_hint_levels and uses_all_hint_levels
         else HINT_LEVELS_PER_PROBLEM
     )
 
@@ -392,8 +397,8 @@ def _create_prompts_single(
             hints_list = _extract_hints_list(primitive)
             if uses_fixed_hint_levels:
                 max_hint_level = min(num_hints, len(hints_list))
-                if split_name == "eval":
-                    # Eval covers every hint level (0..max) for each problem.
+                if uses_all_hint_levels:
+                    # Covers every hint level (0..max) for each problem.
                     hint_levels = list(range(max_hint_level + 1))
                 else:
                     hint_levels = _sample_hint_levels(
