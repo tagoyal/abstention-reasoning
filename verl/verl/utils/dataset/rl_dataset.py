@@ -60,7 +60,12 @@ def collate_fn(data_list: list[dict]) -> dict:
         tensors[key] = torch.stack(val, dim=0)
 
     for key, val in non_tensors.items():
-        non_tensors[key] = np.array(val, dtype=object)
+        # np.array(list_of_lists, dtype=object) yields 2-D when all lists have equal length and
+        # 1-D when ragged, which breaks DataProto.concat across workers; force 1-D.
+        arr = np.empty(len(val), dtype=object)
+        for i, v in enumerate(val):
+            arr[i] = v
+        non_tensors[key] = arr
 
     return {**tensors, **non_tensors}
 

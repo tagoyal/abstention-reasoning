@@ -1,0 +1,21 @@
+Write a SQL query to solve the following question for the given database schema.
+
+{problem}
+
+You have access to a hint system. You can request up to 5 progressive hints. Each hint reveals more of the solution approach. If you get stuck, request a hint.
+
+Do all of your reasoning inside a single <think> </think> block. To request a hint, write <request></request> without leaving the think block.
+The system will respond with a hint in <response>...</response> tags, and you continue reasoning in the same think block.
+When you have the final query, close with </think> and put your final answer in <answer> \boxed{YOUR_SQL_QUERY} </answer> tags.
+
+Example format:
+<think>
+...reasoning...
+<request></request>
+<response>...hint 1...</response>
+...reasoning...
+<request></request>
+<response>...hint 2...</response>
+...reasoning...
+</think>
+<answer>\boxed{SELECT ...}</answer>

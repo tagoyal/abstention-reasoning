@@ -1,0 +1,24 @@
+template_variant: method_b
+reward_function: compute_score_hint
+multi_turn: true
+max_turns: 6
+mask_response_tokens: true
+# Forced hint requests get no canned lead-in phrase, so <request></request> has
+# to be predicted from the reasoning state. The `hint` method splices one of
+# seven "I'm stuck..." phrases in front of every request, and the SFT model
+# learned the phrase rather than the decision, reproducing it verbatim in 85%
+# of its RL rollouts.
+hint_transition: false
+# The request lives inside the think block, so </think> is reached exactly once,
+# immediately before <answer>. That is what makes the counterfactual eval
+# possible: `evaluate --no-hints` bans the request token and leaves the model
+# still mid-reasoning and free to continue, rather than stranded past its own
+# </think> with nothing to do but answer cold.
+nested_request: true
+reward_kwargs:
+  hint_penalty: 0.1
+  format_score: 0.1
+  # Requests made after the 5 hints ran out cost 0.2 each, whatever
+  # hint_penalty is; more than 2 of them scores 0.
+  exhausted_penalty: 0.2
+  max_exhausted_requests: 2

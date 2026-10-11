@@ -5,19 +5,54 @@ from pathlib import Path
 from typing import Any
 
 
-def load_json(path: Path | str) -> Any:
-    """Load JSON file."""
+def _json_shards(path: Path) -> list[Path]:
+    return sorted(path.parent.glob(f"{path.stem}.shard*{path.suffix}"))
+
+
+def json_exists(path: Path | str) -> bool:
+    """True if `path` exists as a single JSON file or as shards from `save_json`."""
     path = Path(path)
+    return path.exists() or bool(_json_shards(path))
+
+
+def load_json(path: Path | str) -> Any:
+    """Load JSON file; if `path` is missing but `<stem>.shard*<suffix>` files
+    exist (see `save_json`), load and concatenate them in order."""
+    path = Path(path)
+    if not path.exists():
+        shards = _json_shards(path)
+        if shards:
+            combined: list = []
+            for shard in shards:
+                with open(shard, "r", encoding="utf-8") as f:
+                    combined.extend(json.load(f))
+            return combined
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def save_json(path: Path | str, data: Any, indent: int = 2) -> None:
-    """Save JSON file."""
+def save_json(path: Path | str, data: Any, indent: int = 2, max_shard_bytes: int = 45 * 1024 * 1024) -> None:
+    """Save JSON file. Lists whose serialization exceeds `max_shard_bytes` are
+    split into `<stem>.shard000<suffix>`, `<stem>.shard001<suffix>`, ... (to
+    stay under GitHub's 100MB file limit) and `path` itself is removed;
+    `load_json` recombines them transparently. Stale shards are cleaned up."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=indent, ensure_ascii=False)
+    text = json.dumps(data, indent=indent, ensure_ascii=False)
+    for stale in _json_shards(path):
+        stale.unlink()
+    if not isinstance(data, list) or len(data) <= 1 or len(text.encode("utf-8")) <= max_shard_bytes:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return
+    path.unlink(missing_ok=True)
+    total_bytes = len(text.encode("utf-8"))
+    num_shards = -(-total_bytes // max_shard_bytes)
+    per_shard = -(-len(data) // num_shards)
+    for idx, start in enumerate(range(0, len(data), per_shard)):
+        shard_path = path.parent / f"{path.stem}.shard{idx:03d}{path.suffix}"
+        with open(shard_path, "w", encoding="utf-8") as f:
+            json.dump(data[start:start + per_shard], f, indent=indent, ensure_ascii=False)
 
 
 def save_parquet(path: Path | str, records: list[dict], max_shard_bytes: int = 45 * 1024 * 1024) -> list[Path]:

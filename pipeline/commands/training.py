@@ -7,7 +7,7 @@ import re
 import shutil
 from pathlib import Path
 
-from pipeline.core.io import load_json, load_parquet_shards, save_json
+from pipeline.core.io import json_exists, load_json, load_parquet_shards, save_json
 from pipeline.core.method import Method, resolve_data_name, resolve_models_name
 from pipeline.core.utils import model_short_name as _get_model_short_name
 from pipeline.tasks import get_task
@@ -972,7 +972,7 @@ def train_classifier(
                 save_json(generations_path, per_example_records)
                 print(f"  Saved {len(per_example_records)} val generations to {generations_path}")
 
-                history = load_json(self.history_path) if self.history_path.exists() else []
+                history = load_json(self.history_path) if json_exists(self.history_path) else []
                 history.append({
                     "step": state.global_step,
                     "epoch": state.epoch,
