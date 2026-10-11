@@ -42,8 +42,8 @@ for SPLIT in sft_train sft_val; do
       --data-name "${DATA_NAME}"
 done
 
-python -m pipeline generate --task "${TASK}" --data-name "${DATA_NAME}" --method method_ac --model "${GEN_MODEL}" \
---split sft_train --num-samples 8 --sample-strategy random_correct --async 
+# python -m pipeline generate --task "${TASK}" --data-name "${DATA_NAME}" --method method_ac --model "${GEN_MODEL}" \
+# --split sft_train --num-samples 8 --sample-strategy random_correct --async 
 
-python -m pipeline generate --task "${TASK}" --data-name "${DATA_NAME}" --method method_ac --model "${GEN_MODEL}" \
---split sft_val --num-samples 8 --sample-strategy random_correct --async 
+# python -m pipeline generate --task "${TASK}" --data-name "${DATA_NAME}" --method method_ac --model "${GEN_MODEL}" \
+# --split sft_val --num-samples 8 --sample-strategy random_correct --async 
