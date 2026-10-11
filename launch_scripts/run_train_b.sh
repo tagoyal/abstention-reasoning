@@ -2,8 +2,11 @@
 # Generic train_sft + train_rl runner for one (task, model) combo, using the
 # baseline method and the math_o1 data/models namespace.
 #
-# Usage: bash run_train.sh <task> <model_short_name> <hf_base_model> <data_name>
-#   e.g. bash run_train.sh math qwen2.5-1.5b Qwen/Qwen2.5-1.5B sql_conceptual
+# Usage: bash run_train_b.sh <task> <model_short_name> <hf_base_model> <data_name> [alpha] [base]
+#   e.g. bash run_train_b.sh math qwen2.5-1.5b Qwen/Qwen2.5-1.5B sql_conceptual 0.5 0.1
+# alpha (default 0.5) is hint_penalty_alpha for the quadratic hint penalty and
+# base (default 0.1) is hint_penalty_base, a fixed cost once any hint is used.
+# Both are embedded in the RL run id as _quad-a<alpha>_b<base>.
 
 set -euo pipefail
 
@@ -11,6 +14,8 @@ TASK="$1"
 MODEL="$2"
 HF_MODEL="$3"
 DATA_NAME="$4"
+ALPHA="${5:-0.5}"
+BASE="${6:-0.1}"
 RUN_ID="${MODEL}"
 
 # Qwen3 ships <think>/</think> as atomic special tokens (151667/151668) that a
@@ -49,9 +54,10 @@ python -m pipeline train_sft \
 python -m pipeline train_rl \
   --task "${TASK}" \
   --method method_b \
-  --run-id "${RUN_ID}"_quad-a0.5 \
+  --run-id "${RUN_ID}"_quad-a"${ALPHA}"_b"${BASE}" \
   --sft-model "models/${DATA_NAME}/method_b_sft/${RUN_ID}/model" \
   --data-name "${DATA_NAME}" \
+  --reward-kwargs hint_penalty=0.1 hint_penalty_shape=quadratic hint_penalty_alpha=${ALPHA} hint_penalty_base=${BASE} \
   --override algorithm.norm_adv_by_std_in_grpo=True \
   --override actor_rollout_ref.rollout.val_kwargs.do_sample=True \
              actor_rollout_ref.rollout.val_kwargs.temperature=1 \
