@@ -19,8 +19,8 @@ RUN_ID="${MODEL}"
 
 python -m pipeline evaluate \
   --task "${TASK}" \
-  --method method_b \
-  --run-id "${RUN_ID}_quad-a${ALPHA}_b${BASE}" \
+  --method method_ac \
+  --run-id "${RUN_ID}" \
   --data-name "${DATA_NAME}" \
   --model rl \
   --data-parallel-size "${GPUS}" \
