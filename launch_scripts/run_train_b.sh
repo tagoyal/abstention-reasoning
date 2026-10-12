@@ -41,15 +41,13 @@ else
   BASE_MODEL_DATA_NAME="${DATA_NAME}"
 fi
 
-
-
-# python -m pipeline train_sft \
-#   --task "${TASK}" \
-#   --method method_b \
-#   --run-id "${RUN_ID}" \
-#   --base-model models/${BASE_MODEL_DATA_NAME}/baseline_rl/${RUN_ID}/model \
-#   --data-name "${DATA_NAME}" \
-#   ${STRIP_THINK}
+python -m pipeline train_sft \
+  --task "${TASK}" \
+  --method method_b \
+  --run-id "${RUN_ID}" \
+  --base-model models/${BASE_MODEL_DATA_NAME}/baseline_rl/${RUN_ID}/model \
+  --data-name "${DATA_NAME}" \
+  ${STRIP_THINK}
 
 python -m pipeline train_rl \
   --task "${TASK}" \
@@ -57,6 +55,7 @@ python -m pipeline train_rl \
   --run-id "${RUN_ID}"_quad-a"${ALPHA}"_b"${BASE}" \
   --sft-model "models/${DATA_NAME}/method_b_sft/${RUN_ID}/model" \
   --data-name "${DATA_NAME}" \
+  --overwrite \
   --reward-kwargs hint_penalty=0.1 hint_penalty_shape=quadratic hint_penalty_alpha=${ALPHA} hint_penalty_base=${BASE} \
   --override algorithm.norm_adv_by_std_in_grpo=True \
   --override actor_rollout_ref.rollout.val_kwargs.do_sample=True \
