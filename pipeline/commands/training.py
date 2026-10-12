@@ -1108,6 +1108,12 @@ def _guard_existing_run(
 
     if overwrite:
         print(f"--overwrite: clearing existing run at {run_dir}")
+        # The wandb id has to go with the run: reusing it resumes the old wandb
+        # run, whose step counter is already at its end, and wandb then drops
+        # every step of the new run as non-monotonic.
+        if run_dir is not None and (run_dir / "wandb_run_id").exists():
+            (run_dir / "wandb_run_id").unlink()
+            print(f"  removed {run_dir / 'wandb_run_id'}")
         for path in [checkpoints_dir, rollouts_dir, *model_dirs]:
             if path is None:
                 continue
