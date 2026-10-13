@@ -33,7 +33,22 @@ def _pick_transition(rng, enabled: bool) -> str | None:
     return rng.choice(HINT_TRANSITION_PHRASES) if enabled else None
 
 
-def _close_think_for_request(text: str, transition: str | None, nested: bool = False) -> str:
+_SENTENCE_BOUNDARY_RE = re.compile(r'(?<=[.!?])\s+|\n\n')
+
+
+def _keep_first_sentences(tail: str, k: int) -> tuple[str, bool]:
+    """Cut tail after its k-th sentence. Returns (text, whether a cut was made).
+
+    Boundaries need whitespace after the punctuation, so decimals like 3.5 are
+    not split. A tail with k or fewer sentences is returned unchanged.
+    """
+    for i, m in enumerate(_SENTENCE_BOUNDARY_RE.finditer(tail), start=1):
+        if i == k and m.end() < len(tail.rstrip()):
+            return tail[:m.start()], True
+    return tail, False
+
+
+def _close_think_for_request(text: str, transition: str | None, nested: bool = False, rng=None) -> str:
     """Prepare the CoT so a forced <request></request> can follow it.
 
     nested=False puts the request outside the think block, so the block is
@@ -46,6 +61,10 @@ def _close_think_for_request(text: str, transition: str | None, nested: bool = F
     it chose to answer, and the forced request replaces that choice -- and the
     reasoning is trimmed the same way. No phrase is spliced in: inline, there
     is no boundary left for a lead-in to announce.
+
+    When rng is given, the current turn is cut 1-3 sentences after the last
+    </response> (or after the start of the turn if no hint was given yet), so
+    the request lands before the model has revealed the whole solution.
 
     Only the turn currently being generated is rewritten. Everything up to the
     last injected <response> is committed transcript: rewriting into it would
@@ -69,11 +88,16 @@ def _close_think_for_request(text: str, transition: str | None, nested: bool = F
         if pos >= 0:
             tail = tail[:pos]
 
+    truncated = False
+    if rng is not None:
+        tail, truncated = _keep_first_sentences(tail, rng.randint(1, 3))
+
     # A rollout stopped mid-sentence by the token cap never closed its thinking,
     # so back it up to the last clean boundary rather than cutting mid-word.
     # Without a transition this applies to every path: a request that follows a
     # *concluded* thought is its own giveaway, so the thought is left unfinished.
-    if nested or not had_think or transition is None:
+    # Skipped after a sentence cut, which already ends on a boundary.
+    if not truncated and (nested or not had_think or transition is None):
         period = tail.rfind(". ")
         paragraph = tail.rfind("\n\n")
         cut = max(period + 1 if period >= 0 else -1, paragraph if paragraph >= 0 else -1)
@@ -869,6 +893,7 @@ class Generator(_SamplingParams):
             state["accumulated_text"][idx],
             _pick_transition(rng, self.config.hint_transition),
             nested=self.config.nested_request,
+            rng=rng,
         )
 
         # Append hint request + response
@@ -1524,6 +1549,7 @@ class AsyncGenerator(_SamplingParams):
                             accumulated_text,
                             _pick_transition(force_rng, self.config.hint_transition),
                             nested=self.config.nested_request,
+                            rng=force_rng,
                         )
                         next_idx = last_given_index + 1
                         hint = hints[next_idx]
@@ -1546,6 +1572,7 @@ class AsyncGenerator(_SamplingParams):
                             accumulated_text,
                             _pick_transition(force_rng, self.config.hint_transition),
                             nested=self.config.nested_request,
+                            rng=force_rng,
                         )
                         next_idx = last_given_index + 1
                         hint = hints[next_idx]
@@ -1568,6 +1595,7 @@ class AsyncGenerator(_SamplingParams):
                             accumulated_text,
                             _pick_transition(force_rng, self.config.hint_transition),
                             nested=self.config.nested_request,
+                            rng=force_rng,
                         )
                         next_idx = last_given_index + 1
                         hint = hints[next_idx]

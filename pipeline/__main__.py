@@ -246,12 +246,43 @@ def cmd_generate(args):
     # resample the problems that came back wrong until enough are right.
     target = getattr(args, "target_correct_rate", None)
     if target is not None:
-        return commands.generate_until_target(
+        generated_path = commands.generate_until_target(
             target_correct_rate=target,
             max_oversample=getattr(args, "max_oversample", 5),
             **gen_kwargs,
         )
-    commands.generate(**gen_kwargs)
+    else:
+        generated_path = commands.generate(**gen_kwargs)
+    if getattr(args, "rebalance_hints", False):
+        _rebalance_generated_dataset(args, generated_path)
+    return generated_path
+
+
+def _rebalance_generated_dataset(args, dataset_path):
+    """Write `<dataset>__balanced.json` next to the raw dataset.
+
+    The raw file is left alone: it holds the incorrect records and one record per
+    problem index, which --retry-incorrect resumes from. The balanced file has
+    repeated indices and correct records only, so it is a training input, not a
+    resumable dataset. Train on it with --dataset.
+    """
+    from pipeline.core.hint_schedule import (
+        hint_fractions_from_schedule, rebalance_by_hints, summarize_rebalance)
+    from pipeline.core.io import load_json, save_json
+
+    fraction = getattr(args, "hint_target_fraction", None)
+    if fraction is None:
+        raise SystemExit("error: --rebalance-hints requires --hint-target-fraction "
+                         "(it defines the hint mix to rebalance to)")
+    fractions = hint_fractions_from_schedule(fraction, getattr(args, "max_hints", 4))
+    balanced, report = rebalance_by_hints(
+        load_json(dataset_path), fractions,
+        total=getattr(args, "rebalance_total", None), seed=getattr(args, "seed", 42))
+    out = Path(dataset_path).with_name(Path(dataset_path).stem + "__balanced.json")
+    save_json(out, balanced)
+    print(f"Rebalanced hint mix ({len(balanced)} records) -> {out}")
+    print(summarize_rebalance(report))
+    return out
 
 
 def cmd_generate_tree(args):
@@ -676,6 +707,13 @@ def main():
              "achieved rate swings with teacher strength.")
     p.add_argument("--max-hints", type=int, default=4,
         help="Most hints scheduled for any single problem (default 4).")
+    p.add_argument("--rebalance-hints", action="store_true",
+        help="After generation, write <dataset>__balanced.json: correct records "
+             "resampled so the hint counts follow the schedule's shares ((1 - "
+             "--hint-target-fraction) with no hints, the rest split evenly over "
+             "1..--max-hints). Up/downsamples buckets; other hint counts are dropped.")
+    p.add_argument("--rebalance-total", type=int, default=None,
+        help="Size of the balanced set (default: number of eligible correct records).")
     p.add_argument("--hint-buckets", type=str, default=None,
         help="Pass-rate to hint-count mapping for --hint-schedule, as "
              "'max_pass_rate:num_hints,...'. Default: '0.0:4,0.25:3,0.5:2,0.75:1,1.0:0' "

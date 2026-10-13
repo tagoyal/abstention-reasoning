@@ -205,3 +205,75 @@ def schedule_by_rank(
         band = min(max_hints - 1, pos * max_hints // n_hinted)
         schedule[idx] = max_hints - band
     return schedule
+
+
+def hint_fractions_from_schedule(target_hint_fraction: float, max_hints: int) -> dict[int, float]:
+    """Hint-count shares that `schedule_by_rank` aims for: 1 - target_hint_fraction
+    with no hints, and the rest split evenly over 1..max_hints."""
+    if not 0.0 <= target_hint_fraction <= 1.0:
+        raise ValueError(f"target_hint_fraction must be in [0, 1], got {target_hint_fraction}")
+    if max_hints < 1:
+        raise ValueError(f"max_hints must be >= 1, got {max_hints}")
+    fractions = {0: 1.0 - target_hint_fraction}
+    for n in range(1, max_hints + 1):
+        fractions[n] = target_hint_fraction / max_hints
+    return fractions
+
+
+def rebalance_by_hints(
+    records: list[dict],
+    fractions: dict[int, float],
+    total: int | None = None,
+    seed: int = 42,
+) -> tuple[list[dict], dict[int, tuple[int, int]]]:
+    """Resample correct records so hint counts follow `fractions`.
+
+    Only correct records are used (they are the only ones SFT trains on), and
+    records whose hint count is not a key of `fractions` are dropped. Each
+    bucket is downsampled without replacement or upsampled by repeating its
+    records, every record being used floor(target/n) times and the remainder
+    drawn at random, so no record is repeated more than once more than any other.
+    Repeats are tagged `rebalance_copy` > 0.
+
+    `total` defaults to the number of eligible correct records, which keeps the
+    dataset size and moves examples between buckets instead of inflating it.
+
+    Returns (records, {hint_count: (available, used)}).
+    """
+    import random
+
+    eligible = [r for r in records if r.get("correct") and r.get("num_hints") in fractions]
+    if not eligible:
+        raise ValueError("no correct records with a scheduled hint count to rebalance")
+    total = total if total is not None else len(eligible)
+    norm = sum(fractions.values())
+    rng = random.Random(seed)
+
+    by_hints: dict[int, list[dict]] = {}
+    for r in sorted(eligible, key=lambda r: r["index"]):
+        by_hints.setdefault(r["num_hints"], []).append(r)
+
+    out: list[dict] = []
+    report: dict[int, tuple[int, int]] = {}
+    for n in sorted(fractions):
+        pool = by_hints.get(n, [])
+        target = round(total * fractions[n] / norm)
+        report[n] = (len(pool), target if pool else 0)
+        if not pool or target == 0:
+            continue
+        full, rest = divmod(target, len(pool))
+        for copy in range(full):
+            out.extend({**r, "rebalance_copy": copy} for r in pool)
+        out.extend({**r, "rebalance_copy": full} for r in rng.sample(pool, rest))
+    out.sort(key=lambda r: (r["index"], r["rebalance_copy"]))
+    return out, report
+
+
+def summarize_rebalance(report: dict[int, tuple[int, int]]) -> str:
+    total = sum(used for _, used in report.values())
+    lines = ["  hints | available -> used | share"]
+    for n, (avail, used) in sorted(report.items()):
+        lines.append(f"    {n:>3} | {avail:>9} -> {used:<5} | {used / total:5.1%}" if total else f"    {n}")
+        if avail == 0:
+            lines[-1] += "  (EMPTY bucket: nothing to sample)"
+    return "\n".join(lines)
