@@ -53,7 +53,9 @@ python -m pipeline train_rl \
   --overwrite  \
   --override actor_rollout_ref.rollout.val_kwargs.do_sample=True \
              actor_rollout_ref.rollout.val_kwargs.temperature=1 \
-             actor_rollout_ref.rollout.val_kwargs.n=1
+             actor_rollout_ref.rollout.val_kwargs.n=1 \
+             data.filter_overlong_prompts=True \
+             data.filter_overlong_prompts_workers=8
              # add actor_rollout_ref.actor.loss_agg_mode=seq-mean-token-mean above to change loss aggregation
 
 
