@@ -27,6 +27,10 @@ fi
 
 
 for SPLIT in sft_train sft_val; do
+  # generate resumes from existing outputs, so remove them to regenerate from scratch
+  rm -f "data/${DATA_NAME}/.scratch/${SPLIT}__baseline__probe.json" \
+        "data/${DATA_NAME}/sft_datasets/${SPLIT}__method_b.json"
+
   python -m pipeline generate --task "${TASK}" --method baseline --async \
     --model "${GEN_MODEL}" --split "${SPLIT}" --no-hints --num-samples 8 \
     --data-name "${DATA_NAME}" \
