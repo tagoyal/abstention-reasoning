@@ -557,6 +557,7 @@ def generate(
     hint_schedule_from: Path | None = None,
     hint_buckets: str | None = None,
     hint_target_fraction: float | None = None,
+    hint_mix: dict[int, float] | None = None,
     max_hints: int = 4,
     drop_exhausted: bool = False,
     target_correct_rate: float | None = None,
@@ -599,6 +600,10 @@ def generate(
             derived from its pass rates instead of sampled from a global
             distribution.
         hint_buckets: "max_pass_rate:num_hints,..." mapping for the schedule.
+        hint_mix: Exact share of problems per hint count, e.g. {0: .5, 1: .1, ...}.
+            Needs hint_schedule_from. Each problem is assigned a count by
+            difficulty rank and then capped at exactly that many hints, so the
+            model cannot ask for more once its quota is spent.
         hint_target_fraction: Fraction of problems that should request a hint.
             Assigns hints by difficulty rank so the fraction is hit exactly,
             regardless of how the probe's pass rates are distributed. Takes
@@ -631,6 +636,10 @@ def generate(
     # Resolve multi_turn from method config (CLI overrides if explicitly set)
     if multi_turn is None:
         multi_turn = method.multi_turn if method else False
+    if hint_mix is not None and hint_schedule_from is None:
+        raise ValueError("hint_mix needs hint_schedule_from (a no-hint probe) to rank difficulty")
+    if hint_mix is not None and hint_target_fraction is not None:
+        raise ValueError("hint_mix and hint_target_fraction are alternatives; pass one")
     if force_hints_distribution or hint_schedule_from is not None:
         multi_turn = True  # any hint injection requires multi_turn
     if no_hints:
@@ -687,6 +696,7 @@ def generate(
         gpu_memory_utilization=gpu_memory_utilization,
         verbose=verbose,
         ban_hint_requests=no_hints,
+        exact_hints=hint_mix is not None,
         seed=seed,
         hint_transition=method.hint_transition if method else True,
         nested_request=method.nested_request if method else False,
@@ -768,6 +778,7 @@ def generate(
                 DEFAULT_BUCKETS,
                 build_profile,
                 parse_buckets,
+                schedule_by_mix,
                 schedule_by_rank,
                 schedule_from_profile,
                 summarize_schedule,
@@ -778,7 +789,11 @@ def generate(
                       f"{profile.num_samples}; pass rates are 0.0 or 1.0 only, "
                       f"which buckets every problem into the extremes. Re-probe "
                       f"with --num-samples 4+ for a usable difficulty signal.")
-            if hint_target_fraction is not None:
+            if hint_mix is not None:
+                # Scheduled over every prompt, not just the unfinished ones: ranks
+                # are relative, so a retry round must keep each problem's count.
+                schedule = schedule_by_mix(prompts_data, profile, hint_mix)
+            elif hint_target_fraction is not None:
                 # Rank-based: hits the requested hint fraction exactly, whatever
                 # the probe's pass-rate distribution turned out to look like.
                 schedule = schedule_by_rank(remaining_prompts, profile,
@@ -789,7 +804,7 @@ def generate(
             force_hints_list = [schedule[p["index"]] for p in remaining_prompts]
             print(f"Hint schedule from {hint_schedule_from} "
                   f"({len(profile.pass_rates)} problems, {profile.num_samples} samples)")
-            print(summarize_schedule(schedule, profile))
+            print(summarize_schedule({p["index"]: schedule[p["index"]] for p in remaining_prompts}, profile))
         elif force_hints_distribution:
             # NB: no local `import random` here. A function-scope import makes
             # `random` local to the whole of generate(), so the selection code
@@ -1247,6 +1262,20 @@ def generate_until_target(
         rate = correct / len(records)
         print(f"Round {round_idx}: {correct}/{len(records)} correct ({rate:.1%}), "
               f"target {target_correct_rate:.1%}")
+        if generate_kwargs.get("hint_mix") is not None:
+            # With an exact mix the overall rate hides the problem: easy 0-hint
+            # problems pass and mask hint buckets that stay short. Judge the
+            # worst bucket instead, and show them all.
+            buckets: dict[int, list[int]] = {}
+            for r in records:
+                b = buckets.setdefault(r.get("num_hints", 0), [0, 0])
+                b[0] += bool(r.get("correct"))
+                b[1] += 1
+            for k in sorted(buckets):
+                c, n = buckets[k]
+                print(f"    {k} hint(s): {c}/{n} correct ({c / n:.1%})")
+            rate = min(c / n for c, n in buckets.values())
+            print(f"  worst bucket: {rate:.1%}")
 
         if rate >= target_correct_rate:
             print(f"Target reached after {round_idx + 1} round(s).")

@@ -199,6 +199,8 @@ class GenerationConfig:
     nested_request: bool = False  # Keep <request></request> inside the <think> block
     ban_hint_requests: bool = False  # Counterfactual eval: make asking for a hint
                                      # impossible, so the model has to answer alone
+    exact_hints: bool = False  # Forced hint counts are exact: once a prompt has had its
+                               # quota (0 included) it cannot request another. Async only.
     answer_budget: int = 0  # Tokens held back for a forced answer when a generation
                             # runs out of room mid-thought. 0 disables forcing.
 
@@ -223,7 +225,7 @@ class _SamplingParams:
         first layer that keeps the attempt rate near zero.
         """
         from vllm import SamplingParams
-        if self.config.ban_hint_requests:
+        if kwargs.pop("ban_requests", False) or self.config.ban_hint_requests:
             kwargs["bad_words"] = ["request"]
         return SamplingParams(**kwargs)
 
@@ -415,6 +417,8 @@ class Generator(_SamplingParams):
         else:
             force_hints_per = force_hints
         any_forcing = any(f > 0 for f in force_hints_per)
+        if self.config.exact_hints:
+            raise NotImplementedError("exact_hints is only supported by the async generator (--async)")
 
         # Parse hint expressions
         hints_list = []
@@ -1283,7 +1287,7 @@ class AsyncGenerator(_SamplingParams):
 
         request_tag = _request_tag_for(self.config, request_tag, any_forcing)
 
-        if any_forcing:
+        if any_forcing or self.config.exact_hints:
             return await self._generate_with_hints_async_text_based(
                 prompts, hints_list, force_hints_per,
                 request_tag, answer_tag, force_hint_token_range,
@@ -1504,6 +1508,7 @@ class AsyncGenerator(_SamplingParams):
                     break
 
                 needs_forcing = prompt_force > 0 and num_hints_used < prompt_force and last_given_index + 1 < len(hints)
+                turn_request_tag = request_tag
                 if needs_forcing:
                     cap = force_rng.randint(force_hint_token_range[0], force_hint_token_range[1])
                     params = self._sampling_params(
@@ -1516,15 +1521,22 @@ class AsyncGenerator(_SamplingParams):
                         seed=self.config.seed,
                     )
                 else:
+                    # Quota spent (or none owed): in exact mode the request tag is
+                    # unmatchable and "request" is banned, so no further hint can
+                    # be served -- the model has to finish with what it has.
+                    capped = self.config.exact_hints and (
+                        num_hints_used >= prompt_force or last_given_index + 1 >= len(hints))
                     params = self._sampling_params(
                         temperature=self.config.temperature,
                         top_p=self.config.top_p,
                         max_tokens=remaining,
                         n=1,
-                        stop=[request_tag, answer_tag],
+                        stop=[_UNMATCHABLE_REQUEST_TAG if capped else request_tag, answer_tag],
                         include_stop_str_in_output=True,
                         seed=self.config.seed,
+                        ban_requests=capped,
                     )
+                    turn_request_tag = _UNMATCHABLE_REQUEST_TAG if capped else request_tag
 
                 formatted = self._format_prompt(messages, tokenizer)
                 request_id = f"req_{idx}_{turns}_{uuid.uuid4().hex[:8]}"
@@ -1612,7 +1624,7 @@ class AsyncGenerator(_SamplingParams):
                             print(f"Prompt {idx + 1} token-capped, forced hint {last_given_index + 1}, continuing...")
                         continue
 
-                if request_tag in generated_text:
+                if turn_request_tag in generated_text:
                     if last_given_index + 1 < len(hints):
                         next_idx = last_given_index + 1
                         hint_text, new_last = hints[next_idx], next_idx

@@ -5,6 +5,8 @@ set -euo pipefail
 
 TASK="$1"
 GEN_MODEL="${2:-Qwen/Qwen3-14B}"
+# Exact share of examples per hint count. Each problem is capped at its count.
+HINT_MIX="${HINT_MIX:-0:0.5,1:0.1,2:0.1,3:0.1,4:0.1,5:0.1}"
 
 DATA_NAME="$TASK"
 if [ "$TASK" = "sql" ]; then
@@ -37,12 +39,12 @@ for SPLIT in sft_train sft_val; do
     --output data/${DATA_NAME}/.scratch/${SPLIT}__baseline__probe.json
 
   # Schedule hints from that probe -- harder problems get more -- and oversample
-  # until half the set is correct. The profile is derived in memory; only the
+  # until the worst hint bucket is half correct. The profile is derived in memory; only the
   # dataset is written.
   python -m pipeline generate --task "${TASK}" --method method_b --async \
       --model "${GEN_MODEL}" --split "${SPLIT}" \
       --hint-schedule data/${DATA_NAME}/.scratch/${SPLIT}__baseline__probe.json \
-      --hint-target-fraction 0.5 --max-hints 5 --target-correct-rate 0.5 \
+      --hint-mix "${HINT_MIX}" --target-correct-rate 0.5 \
       --data-name "${DATA_NAME}"
 done
 

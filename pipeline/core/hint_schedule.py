@@ -220,6 +220,64 @@ def hint_fractions_from_schedule(target_hint_fraction: float, max_hints: int) ->
     return fractions
 
 
+def parse_hint_mix(spec: str) -> dict[int, float]:
+    """Parse "0:0.5,1:0.1,2:0.1,3:0.1,4:0.1,5:0.1" into {hint_count: share}.
+
+    Shares are normalised, so "0:5,1:1,2:1" is as good as "0:0.71,...".
+    """
+    mix: dict[int, float] = {}
+    for pair in spec.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        k, share = pair.split(":")
+        k, share = int(k.strip()), float(share.strip())
+        if k < 0 or share < 0:
+            raise ValueError(f"negative hint count or share in {spec!r}")
+        mix[k] = share
+    total = sum(mix.values())
+    if not mix or total <= 0:
+        raise ValueError(f"--hint-mix parsed to nothing usable: {spec!r}")
+    return {k: v / total for k, v in sorted(mix.items())}
+
+
+def schedule_by_mix(
+    prompts: list[dict],
+    profile: "DifficultyProfile",
+    mix: dict[int, float],
+) -> dict[int, int]:
+    """Assign every problem a hint count so the counts follow `mix` exactly.
+
+    Same difficulty ranking as `schedule_by_rank` (hardest first, ties broken by
+    reasoning effort, then index): the hardest slice of problems gets the largest
+    hint count in the mix, the easiest slice the smallest. Slice sizes come from
+    largest-remainder rounding, so they sum to len(prompts).
+
+    Pass the FULL prompt list, not just the unfinished ones: ranks are relative,
+    so scheduling a retry subset alone would re-spread it over the whole mix.
+    """
+    indices = [p["index"] for p in prompts]
+    ranked = sorted(
+        indices,
+        key=lambda i: (profile.pass_rates.get(i, 1.0), -profile.effort.get(i, 0.0), i),
+    )
+    n = len(ranked)
+    ks = sorted(mix, reverse=True)
+    exact = {k: mix[k] * n for k in ks}
+    counts = {k: int(exact[k]) for k in ks}
+    leftover = n - sum(counts.values())
+    for k in sorted(ks, key=lambda k: exact[k] - counts[k], reverse=True)[:leftover]:
+        counts[k] += 1
+
+    schedule: dict[int, int] = {}
+    pos = 0
+    for k in ks:
+        for idx in ranked[pos:pos + counts[k]]:
+            schedule[idx] = k
+        pos += counts[k]
+    return schedule
+
+
 def rebalance_by_hints(
     records: list[dict],
     fractions: dict[int, float],

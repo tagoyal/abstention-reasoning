@@ -204,6 +204,12 @@ def cmd_generate(args):
             level, rate = pair.strip().split(":")
             force_hints_policy[level.strip()] = float(rate.strip())
 
+    hint_mix = None
+    mix_str = getattr(args, "hint_mix", None)
+    if mix_str:
+        from pipeline.core.hint_schedule import parse_hint_mix
+        hint_mix = parse_hint_mix(mix_str)
+
     gen_kwargs = dict(
         task_name=args.task,
         model_name=args.model,
@@ -236,6 +242,7 @@ def cmd_generate(args):
                             if getattr(args, "hint_schedule", None) else None),
         hint_buckets=getattr(args, "hint_buckets", None),
         hint_target_fraction=getattr(args, "hint_target_fraction", None),
+        hint_mix=hint_mix,
         max_hints=getattr(args, "max_hints", 4),
         drop_exhausted=getattr(args, "drop_exhausted", False),
         data_name=args.data_name,
@@ -271,10 +278,14 @@ def _rebalance_generated_dataset(args, dataset_path):
     from pipeline.core.io import load_json, save_json
 
     fraction = getattr(args, "hint_target_fraction", None)
-    if fraction is None:
+    if getattr(args, "hint_mix", None):
+        from pipeline.core.hint_schedule import parse_hint_mix
+        fractions = parse_hint_mix(args.hint_mix)
+    elif fraction is None:
         raise SystemExit("error: --rebalance-hints requires --hint-target-fraction "
-                         "(it defines the hint mix to rebalance to)")
-    fractions = hint_fractions_from_schedule(fraction, getattr(args, "max_hints", 4))
+                         "or --hint-mix (it defines the hint mix to rebalance to)")
+    else:
+        fractions = hint_fractions_from_schedule(fraction, getattr(args, "max_hints", 4))
     balanced, report = rebalance_by_hints(
         load_json(dataset_path), fractions,
         total=getattr(args, "rebalance_total", None), seed=getattr(args, "seed", 42))
@@ -705,6 +716,14 @@ def main():
              "hints by difficulty RANK so the fraction is hit exactly whatever the "
              "probe's pass rates look like. Preferred over --hint-buckets, whose "
              "achieved rate swings with teacher strength.")
+    p.add_argument("--hint-mix", type=str, default=None,
+        help="Exact share of problems per hint count, e.g. "
+             "'0:0.5,1:0.1,2:0.1,3:0.1,4:0.1,5:0.1'. Needs --hint-schedule. Ranks "
+             "problems by difficulty (hardest get the most hints) and caps every "
+             "rollout at exactly its hint count: after its quota the model cannot "
+             "request again, and 0-hint problems cannot request at all. With "
+             "--target-correct-rate, resampling runs until the worst hint bucket "
+             "reaches the target. Alternative to --hint-target-fraction.")
     p.add_argument("--max-hints", type=int, default=4,
         help="Most hints scheduled for any single problem (default 4).")
     p.add_argument("--rebalance-hints", action="store_true",
