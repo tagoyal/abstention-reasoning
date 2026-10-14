@@ -6,7 +6,9 @@ set -euo pipefail
 TASK="$1"
 GEN_MODEL="${2:-Qwen/Qwen3-14B}"
 # Exact share of examples per hint count. Each problem is capped at its count.
-HINT_MIX="${HINT_MIX:-0:0.5,1:0.1,2:0.1,3:0.1,4:0.1,5:0.1}"
+HINT_MIX="${HINT_MIX:-0:0.4,1:0.2,2:0.15,3:0.1,4:0.08,5:0.07}"
+# Suffix for the output files: <split>__method_b__<SUFFIX>.json. Train on them with --dataset.
+SUFFIX="${SUFFIX:-hintmix}"
 
 DATA_NAME="$TASK"
 if [ "$TASK" = "sql" ]; then
@@ -31,7 +33,7 @@ fi
 for SPLIT in sft_train sft_val; do
   # generate resumes from existing outputs, so remove them to regenerate from scratch
   rm -f "data/${DATA_NAME}/.scratch/${SPLIT}__baseline__probe.json" \
-        "data/${DATA_NAME}/sft_datasets/${SPLIT}__method_b.json"
+        "data/${DATA_NAME}/sft_datasets/${SPLIT}__method_b__${SUFFIX}.json"
 
   python -m pipeline generate --task "${TASK}" --method baseline --async \
     --model "${GEN_MODEL}" --split "${SPLIT}" --no-hints --num-samples 8 \
@@ -45,6 +47,7 @@ for SPLIT in sft_train sft_val; do
       --model "${GEN_MODEL}" --split "${SPLIT}" \
       --hint-schedule data/${DATA_NAME}/.scratch/${SPLIT}__baseline__probe.json \
       --hint-mix "${HINT_MIX}" --target-correct-rate 0.5 \
+      --output "data/${DATA_NAME}/sft_datasets/${SPLIT}__method_b__${SUFFIX}.json" \
       --data-name "${DATA_NAME}"
 done
 
