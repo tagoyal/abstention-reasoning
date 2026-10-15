@@ -25,10 +25,10 @@ set -euo pipefail
 # done
 
 TASKS=(math)
-DATA_NAME=math_o2
+DATA_NAME=math_o3
 MODELS=(qwen2.5-1.5b qwen2.5-3b qwen3-4b)
-ALPHA=0.5
-BASE=0.05
+ALPHA=2
+BASE=0.1
 
 
 # Short name -> HuggingFace base model id. Qwen3 models use the -Base
