@@ -41,12 +41,19 @@ else
   BASE_MODEL_DATA_NAME="${DATA_NAME}"
 fi
 
+# run_sft_data.sh writes sft_{train,val}__method_b__<SUFFIX>.json; the default
+# lookup expects no suffix, so point train_sft at the suffixed files.
+SUFFIX="${SUFFIX:-hintmix}"
+DS_DIR="data/${DATA_NAME}/sft_datasets"
+
 python -m pipeline train_sft \
   --task "${TASK}" \
   --method method_b \
   --run-id "${RUN_ID}" \
   --base-model models/${BASE_MODEL_DATA_NAME}/baseline_rl/${RUN_ID}/model \
   --data-name "${DATA_NAME}" \
+  --dataset "${DS_DIR}/sft_train__method_b__${SUFFIX}.json" \
+  --eval-dataset "${DS_DIR}/sft_val__method_b__${SUFFIX}.json" \
   ${STRIP_THINK}
 
 python -m pipeline train_rl \
