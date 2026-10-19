@@ -14,7 +14,7 @@ MAX_HINTS="${MAX_HINTS:-2}"
 
 DATA_NAME="$TASK"
 if [ "$TASK" = "sql" ]; then
-  DATA_NAME="sql_partial_sols"
+  DATA_NAME="sql_2"
 fi
 if [ "$TASK" = "math" ]; then
   DATA_NAME="math_o3"
