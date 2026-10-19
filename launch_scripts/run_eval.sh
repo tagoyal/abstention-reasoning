@@ -15,11 +15,11 @@ DATA_NAME="$3"
 GPUS="${4:-1}"
 ALPHA="${5:-0.5}"
 BASE="${6:-0.1}"
-RUN_ID="${MODEL}"
+RUN_ID="${MODEL}_quad-a${ALPHA}_b${BASE}"
 
 python -m pipeline evaluate \
   --task "${TASK}" \
-  --method method_ac \
+  --method method_b \
   --run-id "${RUN_ID}" \
   --data-name "${DATA_NAME}" \
   --model rl \
@@ -40,4 +40,3 @@ python -m pipeline evaluate \
 #     --data-parallel-size "${GPUS}" \
 #     --async
 # done
-
