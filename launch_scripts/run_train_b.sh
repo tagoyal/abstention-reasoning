@@ -50,24 +50,24 @@ if [[ "${DATA_NAME}" == "sql_2" ]]; then
   TRAIN_SUFFIX="${SUFFIX}_upsampled"
 fi
 
-python -m pipeline train_sft \
-  --task "${TASK}" \
-  --method baseline \
-  --run-id "${RUN_ID}" \
-  --base-model models/${BASE_MODEL_DATA_NAME}/baseline_rl/${RUN_ID}/model \
-  --data-name "${DATA_NAME}" \
-  --dataset "${DS_DIR}/sft_train__baseline.json" \
-  --eval-dataset "${DS_DIR}/sft_val__baseline.json" \
-  ${STRIP_THINK}
+# python -m pipeline train_sft \
+#   --task "${TASK}" \
+#   --method method_b \
+#   --run-id "${RUN_ID}" \
+#   --base-model models/${BASE_MODEL_DATA_NAME}/baseline_rl/${RUN_ID}/model \
+#   --data-name "${DATA_NAME}" \
+#   --dataset "${DS_DIR}/sft_train__method_b__${TRAIN_SUFFIX}.json" \
+#   --eval-dataset "${DS_DIR}/sft_val__method_b__${SUFFIX}.json" \
+#   ${STRIP_THINK}
 
 python -m pipeline train_rl \
   --task "${TASK}" \
-  --method baseline \
+  --method method_b \
   --run-id "${RUN_ID}"_quad-a"${ALPHA}"_b"${BASE}" \
   --sft-model "models/${DATA_NAME}/method_b_sft/${RUN_ID}/model" \
   --data-name "${DATA_NAME}" \
   --overwrite \
-  --save-freq 50 \
+  --save-freq 25 \
   --test-freq 25 \
   --keep-checkpoints \
   --reward-kwargs hint_penalty=0.1 hint_penalty_shape=quadratic hint_penalty_alpha=${ALPHA} hint_penalty_base=${BASE} \
