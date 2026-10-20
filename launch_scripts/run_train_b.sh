@@ -56,8 +56,8 @@ python -m pipeline train_sft \
   --run-id "${RUN_ID}" \
   --base-model models/${BASE_MODEL_DATA_NAME}/baseline_rl/${RUN_ID}/model \
   --data-name "${DATA_NAME}" \
-  --dataset "${DS_DIR}/sft_train__method_b__${TRAIN_SUFFIX}.json" \
-  --eval-dataset "${DS_DIR}/sft_val__method_b__${SUFFIX}.json" \
+  --dataset "${DS_DIR}/sft_train__baseline.json" \
+  --eval-dataset "${DS_DIR}/sft_val__baseline.json" \
   ${STRIP_THINK}
 
 python -m pipeline train_rl \
