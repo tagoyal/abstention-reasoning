@@ -52,7 +52,7 @@ fi
 
 python -m pipeline train_sft \
   --task "${TASK}" \
-  --method method_b \
+  --method baseline \
   --run-id "${RUN_ID}" \
   --base-model models/${BASE_MODEL_DATA_NAME}/baseline_rl/${RUN_ID}/model \
   --data-name "${DATA_NAME}" \
@@ -62,7 +62,7 @@ python -m pipeline train_sft \
 
 python -m pipeline train_rl \
   --task "${TASK}" \
-  --method method_b \
+  --method baseline \
   --run-id "${RUN_ID}"_quad-a"${ALPHA}"_b"${BASE}" \
   --sft-model "models/${DATA_NAME}/method_b_sft/${RUN_ID}/model" \
   --data-name "${DATA_NAME}" \
