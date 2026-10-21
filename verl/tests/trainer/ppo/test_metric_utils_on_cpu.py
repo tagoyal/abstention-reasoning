@@ -25,8 +25,10 @@ from verl.trainer.ppo.metric_utils import (
     bootstrap_metric,
     calc_maj_val,
     compute_data_metrics,
+    compute_hint_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
+    compute_validation_hint_metrics,
     process_validation_metrics,
 )
 from verl.utils.metric import (
@@ -125,6 +127,69 @@ class TestComputeDataMetrics(unittest.TestCase):
         self.assertIn("critic/score/mean", metrics)
         self.assertIn("critic/rewards/mean", metrics)
         self.assertIn("response_length/mean", metrics)
+
+    def test_hint_precision_replaces_conditional_accuracy(self):
+        self.batch.non_tensor_batch = {"num_hints": [0, 1], "correct": [True, False]}
+        metrics = compute_data_metrics(self.batch, use_critic=False)
+        self.assertEqual(metrics["precision/hints_0"], 1.0)
+        self.assertEqual(metrics["precision/hints_1"], 0.0)
+        self.assertNotIn("accuracy/hints_0", metrics)
+        self.assertEqual(metrics["accuracy/overall"], 0.5)
+        self.assertEqual(metrics["rollout/num_hints/pct_0"], 0.5)
+
+    def test_zero_hint_batch_still_reports_distribution_and_precision(self):
+        self.batch.non_tensor_batch = {"num_hints": [0, 0], "correct": [True, False]}
+        metrics = compute_data_metrics(self.batch, use_critic=False)
+        self.assertEqual(metrics["precision/hints_0"], 0.5)
+        self.assertEqual(metrics["rollout/num_hints/pct_0"], 1.0)
+        self.assertEqual(metrics["rollout/num_hints/pct_1"], 0.0)
+        self.assertNotIn("precision/hints_1", metrics)
+
+
+class TestHintMetrics(unittest.TestCase):
+    def test_validation_precision_and_unconditional_zero_hint_accuracy(self):
+        metrics = compute_validation_hint_metrics(
+            {"num_hints": [0, 0, 1, 1, 2, 2], "correct": [True, False, True, True, False, False]}
+        )
+        self.assertEqual(metrics["val/precision/hints_0"], 0.5)
+        self.assertEqual(metrics["val/precision/hints_1"], 1.0)
+        self.assertEqual(metrics["val/precision/hints_2"], 0.0)
+        self.assertAlmostEqual(metrics["val/accuracy/hint_0"], 1 / 6)
+        for i in range(3):
+            self.assertAlmostEqual(metrics[f"val/rollout/num_hints/pct_{i}"], 1 / 3)
+
+    def test_multiple_answers_average_per_question(self):
+        # Two questions, two answers each: their zero-hint accuracies are 1/2 and 0.
+        metrics = compute_validation_hint_metrics({"num_hints": [0, 1, 0, 2], "correct": [True, True, False, True]})
+        self.assertEqual(metrics["val/accuracy/hint_0"], 0.25)
+        self.assertEqual(metrics["val/precision/hints_0"], 0.5)
+
+    def test_empty_buckets_have_zero_usage_but_no_precision(self):
+        metrics = compute_validation_hint_metrics({"num_hints": [1, 1], "correct": [True, False]})
+        self.assertEqual(metrics["val/accuracy/hint_0"], 0.0)
+        self.assertEqual(metrics["val/rollout/num_hints/pct_0"], 0.0)
+        self.assertNotIn("val/precision/hints_0", metrics)
+        self.assertNotIn("val/precision/hints_2", metrics)
+
+    def test_empty_or_missing_hint_data(self):
+        self.assertEqual(compute_validation_hint_metrics({}), {})
+        self.assertEqual(compute_validation_hint_metrics({"num_hints": [], "correct": []}), {})
+
+    def test_higher_hint_buckets_preserve_distribution(self):
+        metrics = compute_hint_metrics([0, 3, 6, 7], [True, False, True, False])
+        self.assertEqual(metrics["rollout/num_hints/pct_6plus"], 0.5)
+        self.assertEqual(metrics["precision/hints_6plus"], 0.5)
+        self.assertEqual(metrics["precision/hints_3"], 0.0)
+
+    def test_mismatched_arrays_raise(self):
+        with self.assertRaisesRegex(ValueError, "matching shapes"):
+            compute_hint_metrics([0, 1], [True])
+
+    def test_missing_correctness_only_reports_usage(self):
+        metrics = compute_validation_hint_metrics({"num_hints": [0, 1]})
+        self.assertEqual(metrics["val/rollout/num_hints/pct_0"], 0.5)
+        self.assertNotIn("val/accuracy/hint_0", metrics)
+        self.assertNotIn("val/precision/hints_0", metrics)
 
 
 class TestComputeTimingMetrics(unittest.TestCase):

@@ -19,12 +19,16 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import math
 import os
+import re
+import shutil
 import uuid
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from pprint import pprint
 from typing import Optional, Type
 
@@ -47,6 +51,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
+    compute_validation_hint_metrics,
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
@@ -792,7 +797,7 @@ class RayPPOTrainer:
         data_sources = np.concatenate(data_source_lst, axis=0)
 
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
-        metric_dict = {}
+        metric_dict = compute_validation_hint_metrics(reward_extra_infos_dict)
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
             for var_name, metric2val in var2metric2val.items():
@@ -954,59 +959,87 @@ class RayPPOTrainer:
         key = sorted(candidates)[0]
         return key, float(val_metrics[key])
 
-    def _maybe_save_best_checkpoint(self, val_metrics: dict):
-        """Checkpoint only when validation improves, and record which step won.
+    def _load_best_checkpoint_records(self):
+        root = Path(self.config.trainer.default_local_dir)
+        manifest = root / "best_checkpoints.json"
+        if self.config.trainer.get("save_hint_bests", False) and manifest.exists():
+            return json.loads(manifest.read_text())
+        legacy = root / "best_checkpoint.json"
+        return {"best": json.loads(legacy.read_text())} if legacy.exists() else {}
 
-        verl has no notion of a best checkpoint: it saves on a fixed cadence and
-        prunes by recency. Driving the save from the validation score instead
-        means the run keeps the checkpoint worth keeping rather than the most
-        recent one, and best_checkpoint.json tells the caller which that was.
-        """
+    def _prune_best_checkpoints(self):
+        """Keep every metric winner and the latest resumable checkpoint."""
+        if not self.config.trainer.get("save_hint_bests", False):
+            return
+        root = Path(self.config.trainer.default_local_dir).resolve()
+        records = self._load_best_checkpoint_records()
+        keep = {int(record["step"]) for record in records.values()}
+        keep.add(self.global_steps)
+        for step in keep:
+            if not (root / f"global_step_{step}" / "actor").is_dir():
+                raise FileNotFoundError(f"Selected checkpoint global_step_{step} is missing from {root}")
+        for checkpoint in root.glob("global_step_*"):
+            match = re.fullmatch(r"global_step_(\d+)", checkpoint.name)
+            if match and int(match.group(1)) not in keep and checkpoint.is_dir() and not checkpoint.is_symlink():
+                shutil.rmtree(checkpoint)
+                print(f"save_hint_bests: removed superseded checkpoint {checkpoint.name}")
+
+    def _maybe_save_best_checkpoint(self, val_metrics: dict):
+        """Save once when any selected validation metric strictly improves."""
         if not self.config.trainer.get("save_best", False):
             return
 
         key, score = self._resolve_best_metric(val_metrics)
         if key is None:
+            if self.config.trainer.get("save_hint_bests", False):
+                raise ValueError("save_hint_bests requires a primary validation metric")
             print("save_best: validation produced no usable metric; not saving")
             return
 
-        best_path = os.path.join(self.config.trainer.default_local_dir, "best_checkpoint.json")
-        if not hasattr(self, "_best_val_score"):
-            # A resumed run must not treat its first validation as a new best.
-            self._best_val_score, self._best_val_step = None, None
-            if os.path.exists(best_path):
-                try:
-                    with open(best_path) as f:
-                        record = json.load(f)
-                    self._best_val_score = float(record["score"])
-                    self._best_val_step = int(record["step"])
-                    print(
-                        f"save_best: resuming with best {record.get('metric', key)}="
-                        f"{self._best_val_score:.4f} from step {self._best_val_step}"
-                    )
-                except (ValueError, KeyError, TypeError, OSError) as exc:
-                    print(f"save_best: ignoring unreadable {best_path}: {exc}")
+        candidates = {"best": (key, score)}
+        if self.config.trainer.get("save_hint_bests", False):
+            hint_key = "val/accuracy/hint_0"
+            if hint_key not in val_metrics:
+                raise KeyError(f"save_hint_bests requires validation metric {hint_key}")
+            hint_score = float(val_metrics[hint_key])
+            candidates["best_hint_0"] = (hint_key, hint_score)
+            candidates["best_combined"] = (f"mean({key}, {hint_key})", (score + hint_score) / 2)
 
-        if self._best_val_score is not None and score <= self._best_val_score:
-            print(
-                f"save_best: {key}={score:.4f} at step {self.global_steps} did not beat "
-                f"{self._best_val_score:.4f} at step {self._best_val_step}"
-            )
+        records = self._load_best_checkpoint_records()
+        improvements = {}
+        for label, (metric, value) in candidates.items():
+            if not math.isfinite(value):
+                raise ValueError(f"Cannot select checkpoint using non-finite {metric}={value}")
+            previous = records.get(label)
+            if previous is not None and previous["metric"] != metric:
+                raise ValueError(f"Checkpoint metric for {label} changed from {previous['metric']} to {metric}")
+            if previous is None or value > float(previous["score"]):
+                improvements[label] = {"step": self.global_steps, "metric": metric, "score": value}
+            else:
+                print(f"save_best: {label} did not improve at step {self.global_steps}")
+        if not improvements:
             return
 
-        previous, previous_step = self._best_val_score, self._best_val_step
-        self._best_val_score = score
-        self._best_val_step = self.global_steps
         self._save_checkpoint()
-        with open(best_path, "w") as f:
-            json.dump({"step": self.global_steps, "metric": key, "score": score}, f)
-        print(
-            f"save_best: new best {key}={score:.4f} at step {self.global_steps}"
-            + (f" (previous {previous:.4f} at step {previous_step})" if previous is not None else "")
-        )
+        records.update(improvements)
+        root = Path(self.config.trainer.default_local_dir)
+        outputs = {}
+        if self.config.trainer.get("save_hint_bests", False):
+            outputs[root / "best_checkpoints.json"] = records
+        outputs[root / "best_checkpoint.json"] = records["best"]
+        for path, record in outputs.items():
+            temporary = path.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(record))
+            temporary.replace(path)
+        self._prune_best_checkpoints()
+        for label, record in improvements.items():
+            print(f"save_best: new {label} {record['metric']}={record['score']:.4f} at step {self.global_steps}")
 
     def _save_checkpoint(self):
         from verl.utils.fs import local_mkdir_safe
+
+        if getattr(self, "_last_saved_step", None) == self.global_steps:
+            return
 
         # path: given_path + `/global_step_{global_steps}` + `/actor`
         local_global_step_folder = os.path.join(
@@ -1034,6 +1067,9 @@ class RayPPOTrainer:
         max_critic_ckpt_to_keep = (
             self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
         )
+        if self.config.trainer.get("save_hint_bests", False):
+            # Worker-side recency pruning cannot protect older metric winners.
+            max_actor_ckpt_to_keep = max_critic_ckpt_to_keep = None
 
         self.actor_rollout_wg.save_checkpoint(
             actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
@@ -1069,6 +1105,7 @@ class RayPPOTrainer:
             f.write(str(self.global_steps))
 
         self._last_saved_step = self.global_steps
+        self._prune_best_checkpoints()
 
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":

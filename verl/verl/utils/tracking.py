@@ -22,6 +22,16 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Union
 
+IMPORTANT_METRICS = frozenset(
+    ["critic/score/mean", "val/accuracy/hint_0"]
+    + [
+        f"{prefix}{metric}{i}"
+        for prefix in ("", "val/")
+        for metric in ("precision/hints_", "rollout/num_hints/pct_")
+        for i in range(3)
+    ]
+)
+
 
 class Tracking:
     """A unified tracking interface for logging experiment data to multiple backends.
@@ -142,7 +152,11 @@ class Tracking:
     def log(self, data, step, backend=None):
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
-                logger_instance.log(data=data, step=step)
+                if default_backend == "wandb":
+                    important = {f"important/{key}": value for key, value in data.items() if key in IMPORTANT_METRICS}
+                    logger_instance.log(data={**data, **important}, step=step)
+                else:
+                    logger_instance.log(data=data, step=step)
 
     def __del__(self):
         if "wandb" in self.logger:

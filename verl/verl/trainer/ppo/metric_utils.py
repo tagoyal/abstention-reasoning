@@ -77,6 +77,48 @@ def _compute_response_info(batch: DataProto) -> Dict[str, Any]:
     )
 
 
+def compute_hint_metrics(num_hints, correct=None) -> Dict[str, Any]:
+    """Summarize hint usage and precision, omitting precision for empty buckets."""
+    hints = np.asarray(num_hints, dtype=np.int64)
+    if hints.ndim != 1:
+        raise ValueError("num_hints must be one-dimensional")
+    correct_arr = None if correct is None else np.asarray(correct, dtype=bool)
+    if correct_arr is not None and correct_arr.shape != hints.shape:
+        raise ValueError("correct and num_hints must have matching shapes")
+    if len(hints) == 0:
+        return {}
+
+    metrics = {
+        "rollout/num_hints/mean": float(hints.mean()),
+        "rollout/num_hints/max": int(hints.max()),
+        "rollout/num_hints/min": int(hints.min()),
+    }
+    buckets = [(str(i), hints == i) for i in range(6)]
+    buckets.append(("6plus", hints >= 6))
+    for label, mask in buckets:
+        count = int(mask.sum())
+        metrics[f"rollout/num_hints/count_{label}"] = count
+        metrics[f"rollout/num_hints/pct_{label}"] = count / len(hints)
+        if correct_arr is not None and count > 0:
+            metrics[f"precision/hints_{label}"] = float(correct_arr[mask].mean())
+    return metrics
+
+
+def compute_validation_hint_metrics(reward_extra_infos: Dict[str, list]) -> Dict[str, Any]:
+    """Aggregate validation hint metrics across the entire validation dataset."""
+    hints = reward_extra_infos.get("num_hints")
+    if hints is None:
+        return {}
+    correct = reward_extra_infos.get("correct")
+    metrics = {f"val/{key}": value for key, value in compute_hint_metrics(hints, correct).items()}
+    if correct is not None and len(hints) > 0:
+        # Every question has the same number of sampled answers, so this mean
+        # equals averaging answers per question and then averaging questions.
+        zero_hint_correct = np.asarray(correct, dtype=bool) & (np.asarray(hints) == 0)
+        metrics["val/accuracy/hint_0"] = float(zero_hint_correct.mean())
+    return metrics
+
+
 def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str, Any]:
     """
     Computes various metrics from a batch of data for PPO training.
@@ -203,26 +245,13 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         metrics["num_turns/max"] = num_turns.max()
         metrics["num_turns/mean"] = num_turns.mean()
 
-    # Hint distribution and reward/accuracy breakdown by hint count
-    # Only report when hints are actually used (skip for non-hint methods)
+    # Include zero-hint batches so usage and precision curves do not disappear.
     if num_hints is not None:
         num_hints_arr = np.array(num_hints, dtype=np.int64)
         total_samples = len(num_hints_arr)
+        metrics.update(compute_hint_metrics(num_hints, correct))
 
-    if num_hints is not None and num_hints_arr.max() > 0:
-        metrics["rollout/num_hints/mean"] = float(np.mean(num_hints_arr))
-        metrics["rollout/num_hints/max"] = int(np.max(num_hints_arr))
-        metrics["rollout/num_hints/min"] = int(np.min(num_hints_arr))
-
-        # Distribution of num_hints (count/pct for 0-5 and 6+)
-        for i in range(6):
-            count = int((num_hints_arr == i).sum())
-            metrics[f"rollout/num_hints/count_{i}"] = count
-            metrics[f"rollout/num_hints/pct_{i}"] = count / total_samples if total_samples > 0 else 0
-        count_6plus = int((num_hints_arr >= 6).sum())
-        metrics["rollout/num_hints/count_6plus"] = count_6plus
-        metrics["rollout/num_hints/pct_6plus"] = count_6plus / total_samples if total_samples > 0 else 0
-
+    if num_hints is not None and total_samples > 0 and num_hints_arr.max() > 0:
         # Average reward breakdown by hint count
         seq_reward_np = sequence_reward.detach().cpu().numpy()
         for i in range(6):
@@ -274,22 +303,12 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
                 np.array(correct, dtype=bool)[arr > 0].mean()
             )
 
-    # Accuracy metrics (overall and by hint count)
+    # Overall accuracy; conditional precision is reported by compute_hint_metrics.
     if correct is not None:
         correct_arr = np.array(correct, dtype=bool)
         total_samples = len(correct_arr)
 
         metrics["accuracy/overall"] = float(correct_arr.mean()) if total_samples > 0 else 0
-
-        if num_hints is not None and num_hints_arr.max() > 0:
-            for i in range(6):
-                mask = (num_hints_arr == i)
-                count = int(mask.sum())
-                if count > 0:
-                    metrics[f"accuracy/hints_{i}"] = float(correct_arr[mask].mean())
-            mask_6plus = (num_hints_arr >= 6)
-            if mask_6plus.sum() > 0:
-                metrics[f"accuracy/hints_6plus"] = float(correct_arr[mask_6plus].mean())
 
     # Abstention metrics
     if abstained is not None:

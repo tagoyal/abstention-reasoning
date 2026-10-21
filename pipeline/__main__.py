@@ -504,6 +504,7 @@ def cmd_train_rl(args):
         continue_run=args.continue_run,
         save_best=args.save_best,
         best_metric=args.best_metric,
+        save_hint_bests=args.save_hint_bests,
         max_ckpt_to_keep=args.max_ckpt_to_keep,
         data_name=args.data_name,
         models_name=args.models_name,
@@ -914,12 +915,20 @@ def main():
     p = subparsers.add_parser("train_rl", help="Train RL model using verl (GRPO)")
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--method", help="Method name for auto-derived paths, template, and reward config")
-    p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,rl}/. Required with --method; nothing is derived from the base checkpoint.")
+    p.add_argument(
+        "--run-id",
+        help="Identifier for SFT lookup and new RL run names. Required with --method. "
+        "For --continue-run, use the actual existing RL folder name.",
+    )
     p.add_argument("--base-model", help="Base model for cold-start RL (mutually exclusive with --sft-model)")
     p.add_argument("--train-prompts", help="Path to RL train prompts (default: data/{data_name}/problems_with_format/rl_train__{method}.parquet)")
     p.add_argument("--val-prompts", help="Path to RL validation prompts (default: data/{data_name}/problems_with_format/rl_val__{method}.parquet)")
     p.add_argument("--sft-model", help="Path to SFT model (mutually exclusive with --base-model)")
-    p.add_argument("--output", help="Output path (default: models/{models_name}/{method}_rl/{run_id}/model)")
+    p.add_argument(
+        "--output",
+        help="Output path (default: models/{models_name}/{method}_rl/{experiment_name}/model; "
+        "new automatic folders match the dated W&B run name)",
+    )
     p.add_argument("--reward-function", help="Path to reward function (default: task's reward function)")
     p.add_argument("--train-batch-size", type=int, default=64, help="Training batch size")
     p.add_argument("--val-batch-size", type=int, default=64, help="Validation batch size")
@@ -936,14 +945,30 @@ def main():
     p.add_argument("--n-gpus-per-node", type=int, default=None, help="Total GPUs per node used by the trainer (actor/ref FSDP + rollout). Default: auto-detect all visible GPUs via torch.cuda.device_count(). Decoupled from --tensor-parallel-size.")
     p.add_argument("--gpu-memory-utilization", type=float, default=0.4, help="GPU memory utilization")
     p.add_argument("--project-name", help="Wandb project name (default: {task}-rl)")
-    p.add_argument("--experiment-name", help="Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})")
+    p.add_argument(
+        "--experiment-name",
+        help="Custom experiment name and automatic RL folder name "
+        "(default: {MM_DD}-{method}-{run_id}; resumed runs retain their saved name)",
+    )
     p.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     p.add_argument("--resume", help="Path to resume from existing run")
     p.add_argument("--overwrite", action="store_true", help="Discard an existing run at this run-id and train from scratch")
     p.add_argument("--continue-run", action="store_true", help="Resume the existing run at this run-id from its latest checkpoint")
     p.add_argument("--save-best", action=argparse.BooleanOptionalAction, default=True, help="Also emit best/, the checkpoint with the highest validation score (last/ is always written). Use --no-save-best to disable (default: enabled)")
     p.add_argument("--best-metric", default="auto", help="Validation metric selecting the best checkpoint (default: auto, verl's headline val-core scalar)")
-    p.add_argument("--max-ckpt-to-keep", type=int, default=None, help="Checkpoints to retain during training (default: 1, or 2 with --save-best so best and last both survive)")
+    p.add_argument(
+        "--save-hint-bests",
+        action="store_true",
+        help="Also retain best_hint_0/ and best_combined/ using zero-hint validation accuracy "
+        "and its equal-weight average with --best-metric; retain all winners plus the latest checkpoint",
+    )
+    p.add_argument(
+        "--max-ckpt-to-keep",
+        type=int,
+        default=None,
+        help="Checkpoints to retain during training (default: 1, or 2 with --save-best; "
+        "--save-hint-bests instead protects all metric winners plus latest)",
+    )
     p.add_argument("--keep-checkpoints", action="store_true", help="Keep checkpoints and rollouts after training (by default they are deleted)")
     p.add_argument("--keep-state", action="store_true", help="Keep the last optimizer state checkpoint after training")
     p.add_argument("--reward-kwargs", nargs="*", metavar="KEY=VALUE", help="Override reward kwargs (e.g., --reward-kwargs hint_penalty=0.05 hint_bonus=0.1)")

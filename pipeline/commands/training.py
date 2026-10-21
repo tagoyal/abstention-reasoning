@@ -5,6 +5,7 @@ Training commands - SFT, RL, and checkpoint conversion.
 import os
 import re
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 from pipeline.core.io import json_exists, load_json, load_parquet_shards, save_json
@@ -1080,6 +1081,8 @@ def _guard_existing_run(
             output_path,
             (run_dir / "best") if run_dir is not None else None,
             (run_dir / "last") if run_dir is not None else None,
+            (run_dir / "best_hint_0") if run_dir is not None else None,
+            (run_dir / "best_combined") if run_dir is not None else None,
         )
         if d is not None
     ]
@@ -1173,6 +1176,7 @@ def train_rl(
     max_ckpt_to_keep: int | None = None,
     data_name: str | None = None,
     models_name: str | None = None,
+    save_hint_bests: bool = False,
 ) -> Path:
     """
     Train RL model using verl (GRPO algorithm).
@@ -1185,7 +1189,8 @@ def train_rl(
         train_prompts_path: Path to RL train prompts parquet file
         val_prompts_path: Path to RL validation prompts parquet file
         sft_model_path: Path to SFT model to start from (mutually exclusive with base_model)
-        output_path: Where to save RL model
+        output_path: Where to save RL model (automatic run folders match the W&B
+            experiment name, including its launch-date prefix)
         reward_function_path: Path to reward function (default: task's reward function)
         train_batch_size: Training batch size
         val_batch_size: Validation batch size
@@ -1208,13 +1213,16 @@ def train_rl(
             capacity rather than splitting the model further.
         gpu_memory_utilization: GPU memory utilization for vLLM
         project_name: Wandb project name (default: {task}-rl)
-        experiment_name: Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})
+        experiment_name: Custom experiment name (default: {MM_DD}-{method}-{run_id};
+            resumed runs retain their saved name)
         wandb: Enable wandb logging
         resume_path: Path to resume from existing run (overrides output_path)
         cleanup_checkpoints: Delete checkpoints after training (default: True)
         keep_state: Keep the last optimizer state checkpoint after training (default: False)
         data_name: Data directory name (default: task_name)
         models_name: Models directory name (default: data_name)
+        save_hint_bests: Also retain winners for zero-hint validation accuracy and
+            its equal-weight average with best_metric, plus the latest checkpoint.
 
     Returns:
         Path to trained model
@@ -1253,13 +1261,18 @@ def train_rl(
         save_freq = -1 if save_best else 25
     if test_freq is None:
         test_freq = save_freq if save_freq > 0 else 25
+    if save_hint_bests and not save_best:
+        raise ValueError("--save-hint-bests requires --save-best")
     if save_best and test_freq <= 0:
         raise ValueError("--save-best needs validation enabled; --test-freq must be > 0")
 
     # verl prunes checkpoints by recency. Best-saves only ever happen at
     # increasing steps and the final save is later still, so the two most recent
     # survivors are exactly the best and the last -- but only if room for two.
-    if max_ckpt_to_keep is None:
+    if save_hint_bests:
+        # The trainer protects metric winners rather than pruning by recency.
+        max_ckpt_to_keep = None
+    elif max_ckpt_to_keep is None:
         max_ckpt_to_keep = 2 if save_best else 1
     elif save_best and max_ckpt_to_keep < 2:
         print("Note: --save-best needs room for the best and the final checkpoint; using --max-ckpt-to-keep 2")
@@ -1289,16 +1302,32 @@ def train_rl(
     else:
         raise ValueError("Either --base-model or --sft-model is required (or use --method and --run-id)")
 
-    # Derive run directory structure from method
+    if experiment_name is None and not continue_run and resume_path is None:
+        method_str = method_name if method_name else "default"
+        run_id_str = run_id if run_id else "default"
+        experiment_name = f"{datetime.now():%m_%d}-{method_str}-{run_id_str}"
+
+    # Only new automatic output folders adopt the dated experiment name.
     run_dir = None
     checkpoints_dir = None
     rollouts_dir = None
-    if method is not None and output_path is None:
-        method.ensure_rl_run_dir(models_name, run_id)
-        run_dir = method.rl_run_dir(models_name, run_id)
-        checkpoints_dir = method.rl_checkpoints_dir(models_name, run_id)
-        rollouts_dir = method.rl_rollouts_dir(models_name, run_id)
-        output_path = method.rl_model_path(models_name, run_id)
+    if resume_path is not None:
+        checkpoints_dir = Path(resume_path).resolve()
+        run_dir = checkpoints_dir.parent
+        rollouts_dir = run_dir / "rollouts"
+        output_path = run_dir / "model"
+        print(f"Resuming from: {checkpoints_dir}")
+    elif method is not None and output_path is None:
+        if not run_id:
+            raise ValueError("--run-id is required to name an automatic RL run directory")
+        output_run_id = run_id if continue_run else experiment_name
+        if Path(output_run_id).name != output_run_id or output_run_id in (".", ".."):
+            raise ValueError("Automatic RL experiment names must be single folder names; use --output for custom paths")
+        method.ensure_rl_run_dir(models_name, output_run_id)
+        run_dir = method.rl_run_dir(models_name, output_run_id)
+        checkpoints_dir = method.rl_checkpoints_dir(models_name, output_run_id)
+        rollouts_dir = method.rl_rollouts_dir(models_name, output_run_id)
+        output_path = method.rl_model_path(models_name, output_run_id)
     elif output_path is not None:
         # Custom output path - derive subdirectories from it
         run_dir = output_path.parent if output_path.name == "model" else output_path
@@ -1325,7 +1354,20 @@ def train_rl(
         val_prompts_path = Path(val_prompts_path).resolve()
     checkpoints_dir = Path(checkpoints_dir).resolve()
     rollouts_dir = Path(rollouts_dir).resolve()
-    output_path = Path(output_path).resolve()
+    output_path = Path(output_path).parent.resolve() / Path(output_path).name
+
+    saved_config_path = checkpoints_dir / ".hydra" / "config.yaml"
+    saved_config = None
+    if (continue_run or resume_path is not None) and saved_config_path.exists():
+        import yaml
+
+        saved_config = yaml.safe_load(saved_config_path.read_text())
+        if base_model is None and sft_model_path is None:
+            saved_actor = saved_config.get("actor_rollout_ref", {}).get("model", {}).get("path")
+            if saved_actor is not None:
+                if not isinstance(saved_actor, str) or not saved_actor:
+                    raise ValueError(f"Invalid actor_rollout_ref.model.path in {saved_config_path}")
+                actor_model = saved_actor
 
     # A prompts file that does not exist used to be handed straight to verl,
     # which then failed much later with an opaque error. Only explicitly-passed
@@ -1389,17 +1431,6 @@ def train_rl(
     if reward_kwargs_overrides:
         reward_kwargs.update(reward_kwargs_overrides)
 
-    # Handle resume path
-    if resume_path is not None:
-        # Resume uses the checkpoint directory structure
-        checkpoints_dir = resume_path
-        run_dir = resume_path.parent
-        rollouts_dir = run_dir / "rollouts"
-        output_path = run_dir / "model"
-        if experiment_name is None:
-            experiment_name = run_dir.name
-        print(f"Resuming from: {resume_path}")
-
     # Default reward function path
     if reward_function_path is None:
         reward_function_path = repo_root / f"verl/recipe/{task_name}/reward_function.py"
@@ -1418,12 +1449,16 @@ def train_rl(
     if project_name is None:
         project_name = f"{task_name}-rl-{_model_project_tag(actor_model)}"
 
-    # Generate experiment name if not provided
-    # Format: {method}-{run_id}
+    # Resume with the saved name rather than changing its launch-date prefix.
     if experiment_name is None:
         method_str = method_name if method_name else "default"
         run_id_str = run_id if run_id else "default"
-        experiment_name = f"{method_str}-{run_id_str}"
+        experiment_name = run_dir.name if resume_path is not None else f"{method_str}-{run_id_str}"
+        if continue_run or resume_path is not None:
+            if saved_config is not None:
+                experiment_name = saved_config["trainer"]["experiment_name"]
+                if not isinstance(experiment_name, str) or not experiment_name:
+                    raise ValueError(f"Invalid trainer.experiment_name in {saved_config_path}")
 
     # Get task's system message and assistant prefix for runtime template application
     task = get_task(task_name)
@@ -1457,6 +1492,8 @@ def train_rl(
     print(f"Total Steps: {total_steps}")
     print(f"GPUs per Node: {n_gpus_per_node} (tensor_parallel_size={tensor_parallel_size})")
     print(f"Wandb: {wandb}")
+    if save_hint_bests:
+        print("Checkpoint retention: best reward/selected metric, best hint_0 accuracy, best combined, and latest")
     if template_content:
         print(f"Template: {method.template_variant}/rl.txt")
     print(f"=================================")
@@ -1511,7 +1548,7 @@ def train_rl(
         f"trainer.save_freq={save_freq}",
         f"trainer.test_freq={test_freq}",
         f"trainer.resume_mode={'auto' if (continue_run or resume_path is not None) else 'disable'}",
-        f"trainer.max_actor_ckpt_to_keep={max_ckpt_to_keep}",
+        f"trainer.max_actor_ckpt_to_keep={max_ckpt_to_keep if max_ckpt_to_keep is not None else 'null'}",
         f"trainer.project_name={project_name}",
         f"trainer.experiment_name={experiment_name}",
         f"trainer.total_training_steps={total_steps}",
@@ -1530,6 +1567,8 @@ def train_rl(
     if save_best:
         cmd.append("+trainer.save_best=True")
         cmd.append(f"+trainer.best_ckpt_metric={best_metric}")
+    if save_hint_bests:
+        cmd.append("+trainer.save_hint_bests=True")
 
     # Shuffle seed for training data ordering
     if shuffle_seed is not None:
@@ -1612,7 +1651,11 @@ def train_rl(
 
         best_step = None
         best_record = checkpoints_dir / "best_checkpoint.json"
-        if best_record.exists():
+        selection_records = {}
+        if save_hint_bests:
+            selection_records = json.loads((checkpoints_dir / "best_checkpoints.json").read_text())
+            best_step = int(selection_records["best"]["step"])
+        elif best_record.exists():
             try:
                 best_step = int(json.loads(best_record.read_text())["step"])
             except (ValueError, KeyError, TypeError, OSError) as exc:
@@ -1623,6 +1666,10 @@ def train_rl(
         if best_step is not None:
             best_ckpt = next((d for d in checkpoint_dirs if get_step(d) == best_step), None)
             if best_ckpt is None:
+                if save_hint_bests:
+                    raise FileNotFoundError(
+                        f"best checkpoint global_step_{best_step} is missing from {checkpoints_dir}"
+                    )
                 print(
                     f"Warning: best checkpoint global_step_{best_step} was recorded but is "
                     f"no longer on disk; writing last/ only"
@@ -1632,6 +1679,7 @@ def train_rl(
 
         run_root = output_path.parent
         converted: dict[str, Path] = {}
+        converted_checkpoints: dict[Path, str] = {}
 
         def _clear(path):
             if path.is_symlink():
@@ -1642,27 +1690,35 @@ def train_rl(
         def _convert(label, ckpt):
             actor_path = ckpt / "actor"
             if not actor_path.exists():
+                if save_hint_bests:
+                    raise FileNotFoundError(f"Actor directory not found in selected checkpoint {ckpt}")
                 print(f"Warning: actor directory not found in {ckpt}; skipping {label}/")
                 return
             dest = run_root / label
             _clear(dest)
+            if ckpt in converted_checkpoints:
+                target = converted_checkpoints[ckpt]
+                dest.symlink_to(target, target_is_directory=True)
+                converted[label] = dest
+                print(f"{label}/ is the same checkpoint as {target}/ ({ckpt.name}); symlinked")
+                return
             print(f"\nConverting {label} checkpoint: {ckpt.name}")
             converted[label] = Path(convert_checkpoint(actor_path, output_path=dest))
+            converted_checkpoints[ckpt] = label
             print(f"HuggingFace model saved to: {converted[label]}")
 
         if best_ckpt is not None:
             _convert("best", best_ckpt)
 
-        if best_ckpt is not None and best_ckpt == last_ckpt and "best" in converted:
-            # The final step also won; symlink instead of duplicating the
-            # converted weights on disk.
-            dest = run_root / "last"
-            _clear(dest)
-            dest.symlink_to("best", target_is_directory=True)
-            converted["last"] = dest
-            print(f"last/ is the same checkpoint as best/ ({last_ckpt.name}); symlinked")
-        else:
-            _convert("last", last_ckpt)
+        if save_hint_bests:
+            for label in ("best_hint_0", "best_combined"):
+                step = int(selection_records[label]["step"])
+                ckpt = next((d for d in checkpoint_dirs if get_step(d) == step), None)
+                if ckpt is None:
+                    raise FileNotFoundError(f"{label} checkpoint global_step_{step} is missing from {checkpoints_dir}")
+                _convert(label, ckpt)
+
+        _convert("last", last_ckpt)
 
         # model/ is what method.rl_model_path resolves to, so point it at the
         # checkpoint the run should be judged on and leave the other beside it.
