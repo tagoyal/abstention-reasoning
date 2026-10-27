@@ -11,6 +11,7 @@ Commands:
     create_prompts              Create prompts from primitives
     create_ood_prompts          Create eval prompts from an OOD math benchmark
     generate                    Run model on prompts to create dataset
+    generate_tree_multisample    Label continuations from token-strided solver prefixes
     train_sft                   Train SFT model on generated dataset
     train_classifier            Train verifier/abstain classifier on generate_tree output
     train_rl                    Train RL model using verl (GRPO)
@@ -319,6 +320,36 @@ def cmd_generate_tree(args):
         gpu_memory_utilization=args.gpu_memory_utilization,
         use_async=args.use_async,
         seed=args.seed,
+    )
+
+
+def cmd_generate_tree_multisample(args):
+    """Generate individually labeled continuations from token-strided prefixes."""
+    commands.generate_tree_multisample(
+        task_name=args.task,
+        model_name=args.model,
+        method_name=args.method,
+        split=args.split,
+        stride=args.stride,
+        num_points=args.num_points,
+        num_samples=args.num_samples,
+        run_id=args.run_id,
+        prompts_path=Path(args.prompts) if args.prompts else None,
+        output_path=Path(args.output) if args.output else None,
+        data_name=args.data_name,
+        models_name=args.models_name,
+        batch_size=args.batch_size,
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        tensor_parallel_size=args.tensor_parallel_size,
+        data_parallel_size=args.data_parallel_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        verbose=args.verbose,
+        multi_turn=args.multi_turn,
+        use_async=args.use_async,
+        seed=args.seed,
+        no_hints=args.no_hints,
     )
 
 
@@ -781,6 +812,40 @@ def main():
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.add_argument("--models-name", help="Models directory name under models/ (default: data-name)")
     p.set_defaults(func=cmd_generate_tree)
+
+    p = subparsers.add_parser(
+        "generate_tree_multisample",
+        help="Sample token-strided trajectory prefixes and label each continuation individually",
+    )
+    p.add_argument("--task", required=True, help="Task name")
+    p.add_argument("--model", required=True, help="Model name/path or 'sft'/'rl'")
+    p.add_argument("--method", help="Method for prompts and artifact paths")
+    p.add_argument("--split", default="eval", help="Input prompt split (default: eval)")
+    p.add_argument("--prompts", help="Prompt file (default: data/{data_name}/problems_with_format/{split}__{method}.json)")
+    p.add_argument("--stride", type=int, required=True, help="K: candidate prefix spacing in model tokens")
+    p.add_argument("--num-points", type=int, required=True,
+                   help="N: distinct random positions per trajectory (or all if fewer exist)")
+    p.add_argument("--num-samples", type=int, default=1,
+                   help="M: continuations and individually labeled records per prefix (default: 1)")
+    p.add_argument("--run-id", help="Run identifier; required for 'sft'/'rl' model shortcuts")
+    p.add_argument("--output", help="Output JSON (default: {split}__{method}__tree_multisample[__{run_id}].json)")
+    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--max-new-tokens", type=int, default=2048,
+                   help="Token budget for each full trajectory and each continuation (default: 2048)")
+    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--top-p", type=float, default=1.0)
+    p.add_argument("--tensor-parallel-size", type=int, default=1)
+    p.add_argument("--data-parallel-size", type=int, default=1)
+    p.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    p.add_argument("--verbose", action="store_true", help="Print sample prompts during generation")
+    p.add_argument("--multi-turn", action="store_true", default=None,
+                   help="Enable multi-turn hint generation (auto-detected from method config)")
+    p.add_argument("--async", dest="use_async", action="store_true", help="Use async vLLM generation")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--no-hints", action="store_true", help="Block hint requests during decoding")
+    p.add_argument("--data-name", help="Data directory name (default: task)")
+    p.add_argument("--models-name", help="Models directory name (default: data-name)")
+    p.set_defaults(func=cmd_generate_tree_multisample)
 
     # evaluate
     p = subparsers.add_parser("evaluate", help="Evaluate model")
