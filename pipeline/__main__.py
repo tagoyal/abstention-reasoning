@@ -12,6 +12,7 @@ Commands:
     create_ood_prompts          Create eval prompts from an OOD math benchmark
     generate                    Run model on prompts to create dataset
     generate_tree_multisample    Label continuations from token-strided solver prefixes
+    prepare_multisample_sft      Convert continuation labels to SFT input contexts and targets
     train_sft                   Train SFT model on generated dataset
     train_classifier            Train verifier/abstain classifier on generate_tree output
     train_rl                    Train RL model using verl (GRPO)
@@ -65,6 +66,14 @@ def cmd_list_tasks(args):
     print("Available tasks:")
     for task in tasks:
         print(f"  - {task}")
+
+
+def cmd_prepare_multisample_sft(args):
+    commands.prepare_multisample_sft(
+        dataset_path=Path(args.dataset),
+        output_path=Path(args.output),
+        base_model=args.base_model,
+    )
 
 
 def cmd_list_methods(args):
@@ -539,6 +548,9 @@ def cmd_train_rl(args):
         max_ckpt_to_keep=args.max_ckpt_to_keep,
         data_name=args.data_name,
         models_name=args.models_name,
+        interleave_rl=args.interleave_rl,
+        sft_stride=args.sft_stride,
+        sft_micro_batch_size=args.sft_micro_batch_size,
     )
 
 
@@ -847,6 +859,15 @@ def main():
     p.add_argument("--models-name", help="Models directory name (default: data-name)")
     p.set_defaults(func=cmd_generate_tree_multisample)
 
+    p = subparsers.add_parser(
+        "prepare_multisample_sft",
+        help="Prepare binary-label SFT data from tree multisample output (all shards)",
+    )
+    p.add_argument("--dataset", required=True, help="Source JSON or logical path for all shards")
+    p.add_argument("--output", required=True, help="Separate output JSON path")
+    p.add_argument("--base-model", required=True, help="Training model/tokenizer for the chat template")
+    p.set_defaults(func=cmd_prepare_multisample_sft)
+
     # evaluate
     p = subparsers.add_parser("evaluate", help="Evaluate model")
     p.add_argument("--task", required=True, help="Task name")
@@ -1001,6 +1022,9 @@ def main():
     p.add_argument("--total-steps", type=int, default=400, help="Total training steps")
     p.add_argument("--kl-coef", type=float, default=0.001, help="KL divergence coefficient")
     p.add_argument("--n-samples", type=int, default=8, help="Number of samples per prompt (group size)")
+    p.add_argument("--interleave-rl", action="store_true", help="method_d: alternate online prefix SFT and baseline GRPO batches")
+    p.add_argument("--sft-stride", type=int, default=128, help="method_d: trajectory prefix stride in generated tokens")
+    p.add_argument("--sft-micro-batch-size", type=int, default=1, help="method_d: prefix examples per GPU forward/backward")
     p.add_argument("--save-freq", type=int, default=None, help="Checkpoint save frequency (default: 25, or off when --save-best is set)")
     p.add_argument("--test-freq", type=int, default=None, help="Validation/logging frequency (default: same as save-freq)")
     p.add_argument("--max-prompt-length", type=int, default=2048, help="Maximum prompt length in tokens")

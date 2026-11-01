@@ -1,0 +1,3 @@
+template_variant: baseline
+reward_function: compute_score
+reward_kwargs: {}

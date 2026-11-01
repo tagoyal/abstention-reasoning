@@ -19,6 +19,7 @@ from .data import (
 )
 from .inference import analyze, combine_verifier_eval, evaluate, generate, generate_until_target
 from .tree_multisample import generate_tree_multisample
+from .sft_data import prepare_multisample_sft
 from .training import train_sft, train_classifier, train_rl, convert_checkpoint
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "OOD_DATASETS",
     "generate_tree",
     "generate_tree_multisample",
+    "prepare_multisample_sft",
     # Inference commands
     "generate",
     "generate_until_target",

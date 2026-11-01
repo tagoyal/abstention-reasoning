@@ -293,6 +293,10 @@ def train_sft(
     if not filtered_examples:
         raise ValueError("No valid examples found in dataset!")
 
+    if any(isinstance(ex["prompt"], str) for ex in filtered_examples):
+        completion_only_loss = True
+        print("Preformatted SFT contexts: training on completion tokens only")
+
     # Downsample correct examples if requested
     if max_correct is not None:
         import random
@@ -371,6 +375,20 @@ def train_sft(
     # Format data for SFT
     def format_examples(examples: list[dict]) -> list[dict]:
         formatted = []
+        if any(isinstance(ex["prompt"], str) for ex in examples):
+            if not all(isinstance(ex["prompt"], str) for ex in examples):
+                raise ValueError("Cannot mix preformatted and chat-message SFT prompts")
+            for ex in examples:
+                if mask_response_tokens:
+                    prompt_tokens = tokenizer.encode(ex["prompt"], add_special_tokens=False)
+                    completion_tokens = tokenizer.encode(ex["generation"], add_special_tokens=False)
+                    formatted.append({
+                        "input_ids": prompt_tokens + completion_tokens,
+                        "completion_mask": [0] * len(prompt_tokens) + [1] * len(completion_tokens),
+                    })
+                else:
+                    formatted.append({"prompt": ex["prompt"], "completion": ex["generation"]})
+            return formatted
         if mask_response_tokens:
             # Pre-tokenize with response masking for clean boundaries
             from pipeline.core.utils import tokenize_with_response_mask
@@ -1177,6 +1195,9 @@ def train_rl(
     data_name: str | None = None,
     models_name: str | None = None,
     save_hint_bests: bool = False,
+    interleave_rl: bool = False,
+    sft_stride: int = 128,
+    sft_micro_batch_size: int = 1,
 ) -> Path:
     """
     Train RL model using verl (GRPO algorithm).
@@ -1223,6 +1244,9 @@ def train_rl(
         models_name: Models directory name (default: data_name)
         save_hint_bests: Also retain winners for zero-hint validation accuracy and
             its equal-weight average with best_metric, plus the latest checkpoint.
+        interleave_rl: method_d only: alternate prefix SFT and baseline GRPO batches.
+        sft_stride: method_d prefix spacing in generated tokens.
+        sft_micro_batch_size: method_d prefix examples per GPU forward/backward.
 
     Returns:
         Path to trained model
@@ -1248,6 +1272,15 @@ def train_rl(
     method = None
     if method_name is not None:
         method = Method.load(method_name, task_name)
+
+    method_d = method is not None and method.name == "method_d"
+    if interleave_rl and not method_d:
+        raise ValueError("--interleave-rl requires --method method_d")
+    if method_d:
+        if base_model is None and sft_model_path is None and not (continue_run or resume_path):
+            raise ValueError("method_d requires a baseline checkpoint via --base-model or --sft-model")
+        if sft_stride <= 0 or sft_micro_batch_size <= 0 or n_samples <= 0:
+            raise ValueError("method_d stride, micro batch size, and sample count must be positive")
 
     # Validate mutual exclusion
     if base_model is not None and sft_model_path is not None:
@@ -1285,11 +1318,12 @@ def train_rl(
     if method is not None:
         train_split = "rl_gen_train" if method.name == "method_ac" else "rl_train"
         val_split = "rl_gen_val" if method.name == "method_ac" else "rl_val"
+        prompts_method = Method.load("baseline", task_name) if method_d else method
         if train_prompts_path is None:
-            train_prompts_path = method.formatted_path(data_name, train_split)
+            train_prompts_path = prompts_method.formatted_path(data_name, train_split)
         if val_prompts_path is None:
-            candidate = method.formatted_path(data_name, val_split)
-            if candidate.exists():
+            candidate = prompts_method.formatted_path(data_name, val_split)
+            if candidate.exists() or method_d:
                 val_prompts_path = candidate
 
     # Determine the actor model (base_model or sft_model_path)
@@ -1370,9 +1404,9 @@ def train_rl(
                 actor_model = saved_actor
 
     # A prompts file that does not exist used to be handed straight to verl,
-    # which then failed much later with an opaque error. Only explicitly-passed
-    # paths can be missing here: the auto-derived val path above is assigned
-    # solely when it exists. A prompts path may also be sharded (see
+    # which then failed much later with an opaque error. method_d requires its
+    # held-out validation path rather than falling back to training data.
+    # A prompts path may also be sharded (see
     # save_parquet/load_parquet_shards in pipeline/core/io.py) -- i.e. the
     # single file doesn't exist but `<stem>.shard000.parquet` etc do -- so
     # check for either before reporting it as missing.
@@ -1554,6 +1588,20 @@ def train_rl(
         f"trainer.total_training_steps={total_steps}",
         f"trainer.rollout_data_dir={rollouts_dir}",
     ]
+
+    if method_d:
+        cmd.extend([
+            "+trainer.method_d=True",
+            f"+trainer.interleave_rl={interleave_rl}",
+            f"+trainer.sft_stride={sft_stride}",
+            f"+actor_rollout_ref.actor.sft_micro_batch_size={sft_micro_batch_size}",
+            "actor_rollout_ref.actor.use_kl_loss=" + str(interleave_rl),
+            "reward_model.launch_reward_fn_async=False",
+            "actor_rollout_ref.rollout.val_kwargs.do_sample=True",
+            f"actor_rollout_ref.rollout.val_kwargs.n={n_samples}",
+        ])
+        if best_metric == "auto" and not interleave_rl:
+            best_metric = "sft_val/accuracy"
 
     # Resume into this run's own wandb run rather than forking a new one. Read
     # by the vendored verl tracking.Tracking; harmless when wandb is off.
