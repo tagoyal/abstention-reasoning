@@ -551,6 +551,7 @@ def cmd_train_rl(args):
         interleave_rl=args.interleave_rl,
         sft_stride=args.sft_stride,
         sft_micro_batch_size=args.sft_micro_batch_size,
+        sft_head_only=args.sft_head_only,
     )
 
 
@@ -1022,9 +1023,10 @@ def main():
     p.add_argument("--total-steps", type=int, default=400, help="Total training steps")
     p.add_argument("--kl-coef", type=float, default=0.001, help="KL divergence coefficient")
     p.add_argument("--n-samples", type=int, default=8, help="Number of samples per prompt (group size)")
-    p.add_argument("--interleave-rl", action="store_true", help="method_d: alternate online prefix SFT and baseline GRPO batches")
-    p.add_argument("--sft-stride", type=int, default=128, help="method_d: trajectory prefix stride in generated tokens")
-    p.add_argument("--sft-micro-batch-size", type=int, default=1, help="method_d: prefix examples per GPU forward/backward")
+    p.add_argument("--sft-head-only", action="store_true", help="method_e: freeze backbone during classification SFT (RL still updates it)")
+    p.add_argument("--interleave-rl", action="store_true", help="method_d/method_e: alternate online classification SFT and baseline GRPO batches")
+    p.add_argument("--sft-stride", type=int, default=128, help="method_d/method_e: classification stride in generated tokens")
+    p.add_argument("--sft-micro-batch-size", type=int, default=1, help="Prefixes (method_d) or full trajectories (method_e) per GPU forward/backward")
     p.add_argument("--save-freq", type=int, default=None, help="Checkpoint save frequency (default: 25, or off when --save-best is set)")
     p.add_argument("--test-freq", type=int, default=None, help="Validation/logging frequency (default: same as save-freq)")
     p.add_argument("--max-prompt-length", type=int, default=2048, help="Maximum prompt length in tokens")

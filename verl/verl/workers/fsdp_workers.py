@@ -328,6 +328,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "bias": "none",
                 }
                 actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
+        if role == "actor" and self.config.actor.get("method_e", False):
+            from verl.trainer.ppo.method_e import attach_classification_head
+            attach_classification_head(actor_module, checkpoint_path=local_path)
         torch.distributed.barrier()
 
         if self.rank == 0:
@@ -687,7 +690,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
             # perform training
             with Timer(name="update_policy", logger=None) as timer:
-                if data.meta_info.get("method_d_sft", False):
+                if data.meta_info.get("method_e_sft", False):
+                    metrics = self.actor.method_e_sft(data=data, update=True)
+                elif data.meta_info.get("method_d_sft", False):
                     metrics = self.actor.method_d_sft(data=data, update=True)
                 else:
                     metrics = self.actor.update_policy(data=data)
@@ -704,7 +709,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             lr = self.actor_lr_scheduler.get_last_lr()[0]
             metrics["actor/lr"] = lr
             self.actor_lr_scheduler.step()
-            if data.meta_info.get("method_d_sft", False):
+            if data.meta_info.get("method_d_sft", False) or data.meta_info.get("method_e_sft", False):
                 metrics = {key if key.startswith("sft_") else f"sft_{key}": value
                            for key, value in metrics.items()}
 
@@ -730,7 +735,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data=data.to("cpu"))
-            metrics = self.actor.method_d_sft(data=data, update=False)
+            if data.meta_info.get("method_e_sft", False):
+                metrics = self.actor.method_e_sft(data=data, update=False)
+            else:
+                metrics = self.actor.method_d_sft(data=data, update=False)
             output = self.ulysses_sharding_manager.postprocess_data(
                 data=DataProto(meta_info={"metrics": metrics})
             ).to("cpu")

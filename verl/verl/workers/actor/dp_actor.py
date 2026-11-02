@@ -424,6 +424,52 @@ class DataParallelPPOActor(BasePPOActor):
         metrics["sft_num_examples"] = totals[3].item()
         return metrics
 
+    def method_e_sft(self, data: DataProto, update: bool):
+        from verl.trainer.ppo.method_e import classification_statistics
+
+        self.actor_module.train(update)
+        device = get_device_id()
+        count = data.batch["sft_weights"].sum().to(device)
+        torch.distributed.all_reduce(count)
+        if count.item() <= 0:
+            raise ValueError("method_e requires at least one classification position")
+        totals = torch.zeros(3, device=device)
+        head_only = self.config.get("sft_head_only", False)
+        if update:
+            self.actor_optimizer.zero_grad()
+        with torch.set_grad_enabled(update):
+            for micro in data.batch.split(self.config.get("sft_micro_batch_size", 1)):
+                micro = micro.to(device)
+                width = int(micro["attention_mask"].sum(-1).max().item())
+                with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
+                    logits = self.actor_module(
+                        input_ids=micro["input_ids"][:, -width:],
+                        attention_mask=micro["attention_mask"][:, -width:],
+                        position_ids=micro["position_ids"][:, -width:],
+                        use_cache=False, method_e=True, head_only=head_only,
+                    )
+                stats = classification_statistics(
+                    logits, micro["sft_targets"][:, -width:], micro["sft_weights"][:, -width:],
+                )
+                if update:
+                    (stats["loss"] * torch.distributed.get_world_size() / count).backward()
+                totals += torch.stack([value.detach() for value in stats.values()])
+        metrics = {}
+        if update:
+            if head_only:
+                for name, parameter in self.actor_module.named_parameters():
+                    if "classification_head." not in name:
+                        parameter.grad = None
+            metrics["sft_grad_norm"] = self._optimizer_step().detach().item()
+            self.actor_optimizer.zero_grad()
+        torch.distributed.all_reduce(totals)
+        metrics.update({
+            "sft_loss": (totals[0] / totals[2]).item(),
+            "sft_accuracy": (totals[1] / totals[2]).item(),
+            "sft_num_examples": totals[2].item(),
+        })
+        return metrics
+
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
         # make sure we are in training mode

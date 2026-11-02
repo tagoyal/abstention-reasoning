@@ -18,9 +18,9 @@ RUN_ID="${MODEL}"
 # variant is being trained on: math_o2 reuses math_o1's baseline_rl model,
 # and all sql_* tasks reuse sql_conceptual's baseline_rl model.
 if [[ "${TASK}" == "math" ]]; then
-  BASE_MODEL_DATA_NAME="math_o1"
+  BASE_MODEL_DATA_NAME="math_o3"
 elif [[ "${TASK}" == "sql" ]]; then
-  BASE_MODEL_DATA_NAME="sql_conceptual"
+  BASE_MODEL_DATA_NAME="sql_partial_sols"
 else
   BASE_MODEL_DATA_NAME="${DATA_NAME}"
 fi
@@ -29,7 +29,7 @@ python -m pipeline train_rl \
   --task "${TASK}" \
   --method method_d \
   --run-id "${RUN_ID}" \
-  --base-model "models/${BASE_MODEL_DATA_NAME}/baseline_rl/${RUN_ID}/model" \
+  --base-model "models/${BASE_MODEL_DATA_NAME}/method_ac_rl/${RUN_ID}/model" \
   --data-name "${DATA_NAME}" \
   --n-samples 8 \
   --sft-stride 128 \

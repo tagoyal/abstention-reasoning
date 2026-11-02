@@ -386,25 +386,33 @@ class RayPPOTrainer:
 
     def _validate_config(self):
         config = self.config
-        if config.trainer.get("method_d", False):
+        if config.trainer.get("method_d", False) or config.trainer.get("method_e", False):
+            name = "method_e" if config.trainer.get("method_e", False) else "method_d"
             if (config.actor_rollout_ref.actor.strategy not in ("fsdp", "fsdp2")
                     or config.actor_rollout_ref.rollout.mode != "sync"
                     or config.actor_rollout_ref.rollout.name != "vllm"
                     or config.actor_rollout_ref.actor.ulysses_sequence_parallel_size != 1
                     or config.actor_rollout_ref.actor.get("use_fused_kernels", False)):
                 raise ValueError(
-                    "method_d requires synchronous vLLM, FSDP/FSDP2, unfused logits, and sequence parallel size 1"
+                    f"{name} requires synchronous vLLM, FSDP/FSDP2, unfused logits, and sequence parallel size 1"
                 )
             if config.algorithm.adv_estimator != AdvantageEstimator.GRPO or config.get("allow_hint", False):
-                raise ValueError("method_d requires baseline GRPO without hint interaction")
+                raise ValueError(f"{name} requires baseline GRPO without hint interaction")
             if config.reward_model.enable or config.reward_model.launch_reward_fn_async:
-                raise ValueError("method_d requires synchronous rule-based correctness scoring")
+                raise ValueError(f"{name} requires synchronous rule-based correctness scoring")
             if config.trainer.get("sft_stride", 128) <= 0:
-                raise ValueError("method_d sft_stride must be positive")
+                raise ValueError(f"{name} sft_stride must be positive")
             if config.actor_rollout_ref.actor.get("sft_micro_batch_size", 1) <= 0:
-                raise ValueError("method_d sft_micro_batch_size must be positive")
-            from verl.trainer.ppo.method_d import classification_tokens
-            classification_tokens(self.tokenizer)
+                raise ValueError(f"{name} sft_micro_batch_size must be positive")
+            if config.trainer.get("method_e", False):
+                if config.actor_rollout_ref.model.get("lora_rank", 0) > 0:
+                    raise ValueError("method_e does not support LoRA")
+                if (config.actor_rollout_ref.actor.get("sft_head_only", False)
+                        and not config.actor_rollout_ref.actor.fsdp_config.get("use_orig_params", False)):
+                    raise ValueError("method_e head-only SFT requires FSDP use_orig_params=True")
+            if not config.trainer.get("method_e", False):
+                from verl.trainer.ppo.method_d import classification_tokens
+                classification_tokens(self.tokenizer)
         # number of GPUs total
         n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
         if config.actor_rollout_ref.actor.strategy == "megatron":
@@ -696,6 +704,10 @@ class RayPPOTrainer:
     def _method_d_sft(self, batch, correctness, update):
         from verl.trainer.ppo.method_d import build_prefix_batch
 
+        method_e = self.config.trainer.get("method_e", False)
+        if method_e:
+            from verl.trainer.ppo.method_e import build_trajectory_batch
+            build_prefix_batch = build_trajectory_batch
         if correctness is None:
             raise ValueError("method_d requires the baseline scorer's binary 'correct' metadata")
         prefixes = build_prefix_batch(
@@ -706,7 +718,7 @@ class RayPPOTrainer:
         prefixes, pad_size = pad_dataproto_to_divisor(prefixes, self.actor_rollout_wg.world_size)
         if pad_size:
             prefixes.batch["sft_weights"][-pad_size:] = 0
-        prefixes.meta_info["method_d_sft"] = True
+        prefixes.meta_info["method_e_sft" if method_e else "method_d_sft"] = True
         prefixes.meta_info["global_token_num"] = prefixes.batch["attention_mask"].sum(-1).tolist()
         if update:
             output = self.actor_rollout_wg.update_actor(prefixes)
@@ -803,13 +815,14 @@ class RayPPOTrainer:
             # evaluate using reward_function
             result = self.val_reward_fn(test_batch, return_dict=True)
             reward_tensor = result["reward_tensor"]
-            if self.config.trainer.get("method_d", False):
+            if self.config.trainer.get("method_d", False) or self.config.trainer.get("method_e", False):
                 sft_metrics = self._method_d_sft(
                     test_batch, result.get("reward_extra_info", {}).get("correct"), update=False,
                 )
                 count = sft_metrics["sft_num_examples"]
                 for key in ("sft_loss", "sft_token_accuracy", "sft_accuracy"):
-                    sft_totals[key] += sft_metrics[key] * count
+                    if key in sft_metrics:
+                        sft_totals[key] += sft_metrics[key] * count
                 sft_totals["sft_num_examples"] += count
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
@@ -1307,7 +1320,8 @@ class RayPPOTrainer:
                 metrics = {}
                 timing_raw = {}
                 from verl.trainer.ppo.method_d import is_sft_step
-                sft_step = self.config.trainer.get("method_d", False) and is_sft_step(
+                sft_step = (self.config.trainer.get("method_d", False)
+                            or self.config.trainer.get("method_e", False)) and is_sft_step(
                     self.global_steps, self.config.trainer.get("interleave_rl", False),
                 )
                 batch: DataProto = DataProto.from_single_dict(batch_dict)

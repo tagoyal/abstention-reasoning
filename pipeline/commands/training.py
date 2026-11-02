@@ -1198,6 +1198,7 @@ def train_rl(
     interleave_rl: bool = False,
     sft_stride: int = 128,
     sft_micro_batch_size: int = 1,
+    sft_head_only: bool = False,
 ) -> Path:
     """
     Train RL model using verl (GRPO algorithm).
@@ -1244,9 +1245,10 @@ def train_rl(
         models_name: Models directory name (default: data_name)
         save_hint_bests: Also retain winners for zero-hint validation accuracy and
             its equal-weight average with best_metric, plus the latest checkpoint.
-        interleave_rl: method_d only: alternate prefix SFT and baseline GRPO batches.
-        sft_stride: method_d prefix spacing in generated tokens.
-        sft_micro_batch_size: method_d prefix examples per GPU forward/backward.
+        interleave_rl: method_d/method_e: alternate classification SFT and baseline GRPO.
+        sft_stride: Classification position spacing in generated tokens.
+        sft_micro_batch_size: Prefixes (method_d) or trajectories (method_e) per GPU forward/backward.
+        sft_head_only: method_e: train only the classification head on SFT steps.
 
     Returns:
         Path to trained model
@@ -1273,9 +1275,12 @@ def train_rl(
     if method_name is not None:
         method = Method.load(method_name, task_name)
 
-    method_d = method is not None and method.name == "method_d"
+    method_e = method is not None and method.name == "method_e"
+    method_d = method is not None and method.name in ("method_d", "method_e")
+    if sft_head_only and not method_e:
+        raise ValueError("--sft-head-only requires --method method_e")
     if interleave_rl and not method_d:
-        raise ValueError("--interleave-rl requires --method method_d")
+        raise ValueError("--interleave-rl requires --method method_d or method_e")
     if method_d:
         if base_model is None and sft_model_path is None and not (continue_run or resume_path):
             raise ValueError("method_d requires a baseline checkpoint via --base-model or --sft-model")
@@ -1591,7 +1596,7 @@ def train_rl(
 
     if method_d:
         cmd.extend([
-            "+trainer.method_d=True",
+            f"+trainer.{'method_e' if method_e else 'method_d'}=True",
             f"+trainer.interleave_rl={interleave_rl}",
             f"+trainer.sft_stride={sft_stride}",
             f"+actor_rollout_ref.actor.sft_micro_batch_size={sft_micro_batch_size}",
@@ -1602,6 +1607,12 @@ def train_rl(
         ])
         if best_metric == "auto" and not interleave_rl:
             best_metric = "sft_val/accuracy"
+    if method_e:
+        cmd.extend([
+            "+actor_rollout_ref.actor.method_e=True",
+            f"+actor_rollout_ref.actor.sft_head_only={sft_head_only}",
+            "+actor_rollout_ref.actor.fsdp_config.use_orig_params=True",
+        ])
 
     # Resume into this run's own wandb run rather than forking a new one. Read
     # by the vendored verl tracking.Tracking; harmless when wandb is off.
