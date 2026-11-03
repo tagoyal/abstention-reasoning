@@ -12,13 +12,13 @@ ALPHA="${5:-0.5}"
 BASE="${6:-0.1}"
 RUN_ID="${MODEL}"
 
-if [[ "${TASK}" == "math" ]]; then
-  BASE_MODEL_DATA_NAME="math_o1"
-elif [[ "${TASK}" == "sql" ]]; then
-  BASE_MODEL_DATA_NAME="sql_conceptual"
-else
-  BASE_MODEL_DATA_NAME="${DATA_NAME}"
-fi
+# if [[ "${TASK}" == "math" ]]; then
+#   BASE_MODEL_DATA_NAME="math_o3"
+# elif [[ "${TASK}" == "sql" ]]; then
+#   BASE_MODEL_DATA_NAME="sql_conceptual"
+# else
+#   BASE_MODEL_DATA_NAME="${DATA_NAME}"
+# fi
 
 python -m pipeline train_rl \
   --task "${TASK}" \
