@@ -714,6 +714,7 @@ class RayPPOTrainer:
             batch, correctness, self.tokenizer,
             stride=self.config.trainer.get("sft_stride", 128),
             max_model_len=self.config.actor_rollout_ref.rollout.max_model_len,
+            report=not update,
         )
         prefixes, pad_size = pad_dataproto_to_divisor(prefixes, self.actor_rollout_wg.world_size)
         if pad_size:
@@ -730,6 +731,7 @@ class RayPPOTrainer:
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
         sft_totals = defaultdict(float)
+        sft_group_totals = defaultdict(lambda: defaultdict(float))
 
         # Lists to collect samples for the table
         sample_inputs = []
@@ -824,6 +826,15 @@ class RayPPOTrainer:
                     if key in sft_metrics:
                         sft_totals[key] += sft_metrics[key] * count
                 sft_totals["sft_num_examples"] += count
+                for key, value in sft_metrics.items():
+                    if key.startswith("sft_groups/") and not key.endswith("/num_examples"):
+                        group, metric = key.removeprefix("sft_groups/").rsplit("/", 1)
+                        group_count = sft_metrics[f"sft_groups/{group}/num_examples"]
+                        sft_group_totals[group][metric] += value * group_count
+                for key, value in sft_metrics.items():
+                    if key.startswith("sft_groups/") and key.endswith("/num_examples"):
+                        group = key.removeprefix("sft_groups/").removesuffix("/num_examples")
+                        sft_group_totals[group]["num_examples"] += value
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
@@ -887,6 +898,11 @@ class RayPPOTrainer:
             metric_dict.update({f"sft_val/{key.removeprefix('sft_')}": value / count
                                 for key, value in sft_totals.items() if key != "sft_num_examples"})
             metric_dict["sft_val/num_examples"] = count
+            for group, values in sft_group_totals.items():
+                for metric, value in values.items():
+                    metric_dict[f"sft_val/{group}/{metric}"] = (
+                        value if metric == "num_examples" else value / values["num_examples"]
+                    )
         return metric_dict
 
     def init_workers(self):

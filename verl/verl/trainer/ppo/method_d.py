@@ -20,7 +20,7 @@ def classification_tokens(tokenizer):
     return complete_ids, [ids[0] for ids in label_ids]
 
 
-def build_prefix_batch(rollouts, correctness, tokenizer, stride=128, max_model_len=None):
+def build_prefix_batch(rollouts, correctness, tokenizer, stride=128, max_model_len=None, report=False):
     """Use exact rollout tokens, not decoded/re-tokenized prefixes.
 
     Terminal EOS is a generation control token, not part of the textual output.
@@ -36,13 +36,18 @@ def build_prefix_batch(rollouts, correctness, tokenizer, stride=128, max_model_l
     complete_ids, label_ids = classification_tokens(tokenizer)
     prompt_length = rollouts.batch["prompts"].shape[1]
     contexts, targets = [], []
+    hint_levels, first, final = [], [], []
+    if report:
+        from verl.trainer.ppo.sft_reporting import input_hint_levels, report_groups
+        levels = input_hint_levels(rollouts)
     for i, label in enumerate(correctness):
         mask = rollouts.batch["attention_mask"][i]
         prompt = rollouts.batch["prompts"][i][mask[:prompt_length].bool()].tolist()
         response = rollouts.batch["responses"][i][mask[prompt_length:].bool()].tolist()
         if response and response[-1] == tokenizer.eos_token_id:
             response = response[:-1]
-        for end in [*range(stride, len(response), stride), len(response)]:
+        ends = [*range(stride, len(response), stride), len(response)]
+        for point, end in enumerate(ends):
             context = prompt + response[:end] + complete_ids
             if max_model_len is not None and len(context) + 1 > max_model_len:
                 raise ValueError(
@@ -51,6 +56,10 @@ def build_prefix_batch(rollouts, correctness, tokenizer, stride=128, max_model_l
                 )
             contexts.append(context)
             targets.append(label_ids[int(label)])
+            if report:
+                hint_levels.append(levels[i])
+                first.append(point == 0)
+                final.append(point == len(ends) - 1)
     if not contexts:
         raise ValueError("method_d received no trajectories")
     width = max(map(len, contexts))
@@ -60,7 +69,7 @@ def build_prefix_batch(rollouts, correctness, tokenizer, stride=128, max_model_l
         input_ids[i, -len(context) :] = torch.tensor(context)
         attention_mask[i, -len(context) :] = 1
     position_ids = (attention_mask.cumsum(-1) - 1).clamp_min(0)
-    return DataProto.from_dict(
+    result = DataProto.from_dict(
         tensors={
             "input_ids": input_ids,
             "attention_mask": attention_mask,
@@ -70,6 +79,12 @@ def build_prefix_batch(rollouts, correctness, tokenizer, stride=128, max_model_l
         },
         meta_info={"sft_label_ids": label_ids},
     )
+    if report:
+        result.batch["sft_hint_level"] = torch.tensor(hint_levels)
+        result.batch["sft_position_first"] = torch.tensor(first)
+        result.batch["sft_position_final"] = torch.tensor(final)
+        result.meta_info["sft_report_groups"] = report_groups(levels)
+    return result
 
 
 def classification_statistics(logits, targets, weights, label_ids):

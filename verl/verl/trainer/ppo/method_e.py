@@ -39,7 +39,7 @@ def attach_classification_head(model, checkpoint_path=None):
             model.classification_head.load_state_dict(state)
 
 
-def build_trajectory_batch(rollouts, correctness, tokenizer, stride=128, max_model_len=None):
+def build_trajectory_batch(rollouts, correctness, tokenizer, stride=128, max_model_len=None, report=False):
     if stride <= 0:
         raise ValueError("method_e stride must be positive")
     if len(correctness) != len(rollouts):
@@ -76,11 +76,25 @@ def build_trajectory_batch(rollouts, correctness, tokenizer, stride=128, max_mod
         for point in points:
             weights[i, offset + point] = 1
             targets[i, offset + point] = int(correctness[i])
-    return DataProto.from_dict(tensors={
+    result = DataProto.from_dict(tensors={
         "input_ids": ids, "attention_mask": mask,
         "position_ids": (mask.cumsum(-1) - 1).clamp_min(0),
         "sft_targets": targets, "sft_weights": weights,
     })
+    if report:
+        from verl.trainer.ppo.sft_reporting import input_hint_levels, report_groups
+        levels = input_hint_levels(rollouts)
+        first = torch.zeros_like(ids, dtype=torch.bool)
+        final = torch.zeros_like(first)
+        for i, (context, points) in enumerate(zip(contexts, positions)):
+            offset = width - len(context)
+            first[i, offset + points[0]] = True
+            final[i, offset + points[-1]] = True
+        result.batch["sft_hint_level"] = torch.tensor(levels).unsqueeze(-1).expand_as(ids)
+        result.batch["sft_position_first"] = first
+        result.batch["sft_position_final"] = final
+        result.meta_info["sft_report_groups"] = report_groups(levels)
+    return result
 
 
 def classification_statistics(logits, targets, weights):

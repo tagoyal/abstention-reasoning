@@ -378,6 +378,7 @@ class DataParallelPPOActor(BasePPOActor):
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def method_d_sft(self, data: DataProto, update: bool):
         from verl.trainer.ppo.method_d import classification_statistics
+        from verl.trainer.ppo.sft_reporting import accumulate_groups, finalize_groups
 
         if self.use_ulysses_sp or self.use_fused_kernels:
             raise ValueError("method_d SFT requires sequence parallel size 1 and unfused logits")
@@ -390,6 +391,8 @@ class DataParallelPPOActor(BasePPOActor):
             raise ValueError("method_d SFT requires at least one real prefix")
         world_size = torch.distributed.get_world_size()
         totals = torch.zeros(4, device=device)
+        groups = data.meta_info.get("sft_report_groups", []) if not update else []
+        group_totals = torch.zeros((len(groups), 3), device=device)
         micro_batch_size = self.config.get("sft_micro_batch_size", 1)
         if update:
             self.actor_optimizer.zero_grad()
@@ -414,6 +417,15 @@ class DataParallelPPOActor(BasePPOActor):
                 if update:
                     (stats["loss"] * world_size / count).backward()
                 totals += torch.stack([value.detach() for value in stats.values()])
+                if groups:
+                    logits = output.logits[:, -1]
+                    label_ids = torch.as_tensor(data.meta_info["sft_label_ids"], device=logits.device)
+                    predictions = label_ids[logits[:, label_ids].argmax(-1)]
+                    accumulate_groups(
+                        group_totals, groups, micro_batch, micro_batch["sft_weights"],
+                        predictions == micro_batch["sft_targets"],
+                        logits.argmax(-1) == micro_batch["sft_targets"],
+                    )
         metrics = {}
         if update:
             metrics["sft_grad_norm"] = self._optimizer_step().detach().item()
@@ -422,10 +434,13 @@ class DataParallelPPOActor(BasePPOActor):
         for index, name in enumerate(("loss", "token_accuracy", "accuracy")):
             metrics[f"sft_{name}"] = (totals[index] / totals[3]).item()
         metrics["sft_num_examples"] = totals[3].item()
+        if groups:
+            metrics.update(finalize_groups(group_totals, groups, token_accuracy=True))
         return metrics
 
     def method_e_sft(self, data: DataProto, update: bool):
         from verl.trainer.ppo.method_e import classification_statistics
+        from verl.trainer.ppo.sft_reporting import accumulate_groups, finalize_groups
 
         self.actor_module.train(update)
         device = get_device_id()
@@ -434,6 +449,8 @@ class DataParallelPPOActor(BasePPOActor):
         if count.item() <= 0:
             raise ValueError("method_e requires at least one classification position")
         totals = torch.zeros(3, device=device)
+        groups = data.meta_info.get("sft_report_groups", []) if not update else []
+        group_totals = torch.zeros((len(groups), 3), device=device)
         head_only = self.config.get("sft_head_only", False)
         if update:
             self.actor_optimizer.zero_grad()
@@ -454,6 +471,14 @@ class DataParallelPPOActor(BasePPOActor):
                 if update:
                     (stats["loss"] * torch.distributed.get_world_size() / count).backward()
                 totals += torch.stack([value.detach() for value in stats.values()])
+                if groups:
+                    report_batch = {key: micro[key][:, -width:] for key in (
+                        "sft_hint_level", "sft_position_first", "sft_position_final",
+                    )}
+                    accumulate_groups(
+                        group_totals, groups, report_batch, micro["sft_weights"][:, -width:],
+                        logits.argmax(-1) == micro["sft_targets"][:, -width:],
+                    )
         metrics = {}
         if update:
             if head_only:
@@ -468,6 +493,8 @@ class DataParallelPPOActor(BasePPOActor):
             "sft_accuracy": (totals[1] / totals[2]).item(),
             "sft_num_examples": totals[2].item(),
         })
+        if groups:
+            metrics.update(finalize_groups(group_totals, groups))
         return metrics
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
