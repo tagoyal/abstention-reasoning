@@ -24,7 +24,7 @@ python -m pipeline train_rl \
   --task "${TASK}" \
   --method method_e \
   --run-id "${RUN_ID}" \
-  --base-model "models/${DATA_NAME}/method_ac_rl/${RUN_ID}/model" \
+  --base-model "models/${DATA_NAME}/baseline_rl/${RUN_ID}/model" \
   --data-name "${DATA_NAME}" \
   --sft-stride 128 \
   --sft-micro-batch-size 8 \
