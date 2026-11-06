@@ -1323,7 +1323,7 @@ def train_rl(
     if method is not None:
         train_split = "rl_gen_train" if method.name == "method_ac" else "rl_train"
         val_split = "rl_gen_val" if method.name == "method_ac" else "rl_val"
-        prompts_method = Method.load("baseline", task_name) if method_d else method
+        prompts_method = Method.load("method_ac", task_name) if method_d else method
         if train_prompts_path is None:
             train_prompts_path = prompts_method.formatted_path(data_name, train_split)
         if val_prompts_path is None:

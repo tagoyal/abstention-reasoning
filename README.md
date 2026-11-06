@@ -115,9 +115,9 @@ Pass `--async` to `generate` and `evaluate` for the batched async vLLM path; it 
 
 Initialize from a `method_ac_rl` checkpoint. `train_rl --method method_d`
 uses the existing verl rollout/checkpoint infrastructure, but performs **SFT
-only** by default. It reuses `rl_train__baseline.parquet` and
-`rl_val__baseline.parquet` (including shards); explicit `--train-prompts` and
-`--val-prompts` override these paths.
+only** by default. It reuses the full `rl_train__method_ac.parquet` and
+`rl_val__method_ac.parquet` datasets (including shards), not the `rl_gen_*`
+splits; explicit `--train-prompts` and `--val-prompts` override these paths.
 
 ```bash
 python -m pipeline train_rl --task math --method method_d \
@@ -156,7 +156,7 @@ oversized example errors rather than silently truncating its final-output exampl
 ### Method E: single-pass trajectory classification
 
 Method E initializes from a `method_ac_rl` checkpoint and uses the same online
-correctness labels and baseline prompt datasets as Method D, but adds a randomly
+correctness labels and full `method_ac` prompt datasets as Method D, but adds a randomly
 initialized **two-output classification head**
 (`0`/`1`) to the causal transformer's hidden states instead of using the
 generation head. Each SFT microbatch processes full trajectories once, with
