@@ -42,7 +42,8 @@ python -m pipeline create_partitions --task countdown --seed 42 \
 
 ```bash
 # Apply the baseline template to each partition
-python -m pipeline create_prompts --task sql --method baseline --split all --data-name sql_partial_sols
+python -m pipeline create_prompts --task countdown --method baseline --split all \
+    --data-name countdown
 
 # Teacher rollouts -> SFT data
 python -m pipeline generate --task countdown --method baseline --async \
@@ -67,8 +68,8 @@ python -m pipeline evaluate --task countdown --method baseline --model rl --asyn
 
 ```bash
 # Apply the method_b template to the same partitions
-python -m pipeline create_prompts --task sql --method method_b --split all \
-    --data-name sql_partial_sols
+python -m pipeline create_prompts --task countdown --method method_b --split all \
+    --data-name countdown
 
 # Probe: how often does the teacher solve each problem unaided?
 python -m pipeline generate --task countdown --method baseline --async \
@@ -84,10 +85,6 @@ python -m pipeline generate --task countdown --method method_b --async \
     --hint-schedule data/countdown/.scratch/sft_train__baseline__probe.json \
     --hint-target-fraction 0.5 --max-hints 4 --target-correct-rate 0.5 \
     --data-name countdown
-# For an exact hint-count mix, use --hint-mix instead of --hint-target-fraction
-# and --max-hints, e.g. --hint-mix 0:0.5,1:0.1,2:0.1,3:0.1,4:0.1,5:0.1. Each
-# problem is capped at exactly its count (the model cannot request more), and
-# --target-correct-rate then applies to the worst hint bucket.
 
 # Hint SFT on top of the baseline model
 python -m pipeline train_sft --task countdown --method method_b --run-id qwen2.5-1.5b \
@@ -111,96 +108,6 @@ python -m pipeline evaluate --task countdown --method method_b --model rl --asyn
 
 Pass `--async` to `generate` and `evaluate` for the batched async vLLM path; it is the standard mode here. `--multi-turn` is read from the method config and does not need passing.
 
-### Method D: online trajectory correctness prediction
-
-Initialize from a `method_ac_rl` checkpoint. `train_rl --method method_d`
-uses the existing verl rollout/checkpoint infrastructure, but performs **SFT
-only** by default. It reuses the full `rl_train__method_ac.parquet` and
-`rl_val__method_ac.parquet` datasets (including shards), not the `rl_gen_*`
-splits; explicit `--train-prompts` and `--val-prompts` override these paths.
-
-```bash
-python -m pipeline train_rl --task math --method method_d \
-    --run-id qwen3-4b --data-name math_o3 \
-    --base-model models/math_o3/method_ac_rl/qwen3-4b/model \
-    --n-samples 8 --sft-stride 128 --test-freq 25
-
-# Same model/optimizer, alternating SFT (odd steps) and baseline GRPO (even steps):
-# add --interleave-rl to the command above.
-```
-
-Before each SFT update, the current model generates K fresh trajectories per
-problem (`--n-samples`). Each trajectory receives the baseline scorer's binary
-`correct` label, **not** its fractional reward. Prefixes at 128, 256, ... generated
-tokens and the full output once are appended to the original input, followed
-immediately by `<complete>`. Each prefix predicts the same trajectory's `0` or `1`.
-Terminal EOS/padding is excluded; no future trajectory tokens are visible.
-Both correct and incorrect trajectories are retained. Only the next label token
-is supervised, using full-vocabulary cross entropy; `<complete>` uses the existing
-tokenizer rather than adding randomly initialized vocabulary entries.
-
-W&B logs `sft_loss`, `sft_token_accuracy` (full-vocabulary argmax), and
-`sft_accuracy` (argmax after normalizing probabilities over just the `0` and `1`
-tokens). Validation logs `sft_val/loss`, `sft_val/token_accuracy`, and
-`sft_val/accuracy` over prefixes from fresh held-out rollouts, alongside **unchanged
-baseline RL validation metrics** for final-answer correctness. Metrics weight
-every prefix equally, excluding distributed padding. Pure SFT selects the best
-checkpoint by `sft_val/accuracy`; interleaved runs retain baseline best-checkpoint
-selection unless `--best-metric` is specified.
-
-`--sft-micro-batch-size` defaults to one prefix per GPU forward/backward.
-Method D supports synchronous vLLM with FSDP/FSDP2 and sequence parallel size 1.
-Leave context room for the full prompt + response + `<complete>` + label; an
-oversized example errors rather than silently truncating its final-output example.
-
-### Method E: single-pass trajectory classification
-
-Method E initializes from a `method_ac_rl` checkpoint and uses the same online
-correctness labels and full `method_ac` prompt datasets as Method D, but adds a randomly
-initialized **two-output classification head**
-(`0`/`1`) to the causal transformer's hidden states instead of using the
-generation head. Each SFT microbatch processes full trajectories once, with
-classification losses at every `--sft-stride` response tokens and at the final
-response token (without duplicating an exact stride boundary). There is **no
-`<complete>` tag** and no language-model-head computation during classification.
-The causal attention mask prevents each position from seeing future tokens;
-terminal EOS and padding are excluded. Each position inherits its trajectory's
-correctness label, and both correct and incorrect trajectories are retained.
-
-```bash
-python -m pipeline train_rl --task countdown --method method_e \
-    --run-id qwen2.5-1.5b --data-name countdown \
-    --base-model models/countdown/method_ac_rl/qwen2.5-1.5b/model \
-    --n-samples 8 --sft-stride 128 --sft-micro-batch-size 8 --test-freq 25
-
-# Optional flags:
-# --sft-head-only   Train only the classification head during SFT.
-# --interleave-rl   Alternate SFT (odd steps) and baseline GRPO (even steps).
-```
-
-By default, SFT updates **both the backbone and classification head**. With
-`--sft-head-only`, the backbone receives no SFT gradients or optimizer updates;
-interleaved RL still trains the language model normally. Every step generates a
-fresh rollout batch, including SFT-only runs. `--n-samples` controls trajectories
-per problem (default 8), and `--sft-micro-batch-size` counts **full trajectories**,
-not Method D's separate prefixes. The CLI default is 1; `run_method_e.sh` sets 8
-and forwards additional training flags. This removes repeated transformer
-computation for overlapping prefixes, although generation and full-trajectory
-forward/backward passes still cost time.
-
-W&B logs `sft_loss` (two-class cross entropy), `sft_accuracy`, `sft_num_examples`
-(supervised positions), and `sft_grad_norm` on updates. Unlike Method D, there is
-no separate `sft_token_accuracy`: the head only predicts the two classes.
-Validation reports `sft_val/loss` and `sft_val/accuracy`, weighted equally over
-classification positions, alongside baseline final-answer metrics. Checkpoint
-selection and optional RL alternation follow Method D. The classification head
-is saved with the model and excluded from vLLM weight synchronization.
-
-Method E supports synchronous vLLM, FSDP/FSDP2, unfused logits, and sequence
-parallel size 1; LoRA is unsupported. Full prompt + response must fit the model's
-context window. Its artifacts live under `models/{models_name}/method_e_rl/`
-even for SFT-only runs, because it uses the `train_rl` infrastructure.
-
 ## Tasks
 
 | Task | Problem |
@@ -213,7 +120,7 @@ Each lives in `pipeline/tasks/{task}/` and implements the `BaseTask` interface: 
 
 ## Methods
 
-A *method* bundles a prompt-template variant, a reward function, and its RL settings into one named config (`pipeline/configs/methods/{task}/{method}.yaml`). The config name is also the name its artifacts carry on disk, so renaming a method renames its files. Availability is task-specific (`method_b` is not available for code output).
+A *method* bundles a prompt-template variant, a reward function, and its RL settings into one named config (`pipeline/configs/methods/{task}/{method}.yaml`). The config name is also the name its artifacts carry on disk, so renaming a method renames its files. Four methods exist on countdown and competition math, three on code output (`method_b` is math-and-countdown only).
 
 **Evaluated methods:**
 
@@ -221,9 +128,7 @@ A *method* bundles a prompt-template variant, a reward function, and its RL sett
 |---|---|
 | `baseline` | Answer directly, never ask for a hint. The starting point for every other method. |
 | `hint_encourage` | Multi-turn: ask for hints, with a bonus for admitting a wrong answer. |
-| `method_b` | Multi-turn hint-seeking inside a single `<think>` block, swept over the hint-penalty weight α. Countdown, competition math and sql. |
-| `method_d` | Online next-token correctness prediction from baseline trajectory prefixes; optionally interleave baseline RL. |
-| `method_e` | Single-pass correctness classification at trajectory stride boundaries with a separate two-class head; optionally freeze the backbone for SFT or interleave baseline RL. |
+| `method_b` | Multi-turn hint-seeking inside a single `<think>` block, swept over the hint-penalty weight α. Countdown and competition math only. |
 
 **SFT parents** — not evaluated on their own, but required to produce the hint methods above. Do not delete them:
 

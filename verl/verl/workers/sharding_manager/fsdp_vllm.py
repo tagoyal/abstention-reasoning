@@ -198,8 +198,6 @@ class FSDPVLLMShardingManager(BaseShardingManager):
             else:
                 params = self.module.state_dict()
             params = convert_weight_keys(params, getattr(self.module, "_fsdp_wrapped_module", self.module))
-            params = {key: value for key, value in params.items()
-                      if not key.startswith("classification_head.")}
             log_gpu_memory_usage("After state_dict() in sharding manager memory", logger=logger)
 
             if self.rollout_config.free_cache_engine:
