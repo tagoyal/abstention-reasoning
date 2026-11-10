@@ -156,6 +156,15 @@ actor_rollout_ref:
   # actor configs
   actor:
 
+    # Null disables prefix-success training; zero retains the head with no BCE contribution.
+    success_loss_weight: null
+
+    # Predict terminal correctness after every L generated response tokens.
+    success_interval: 10
+
+    # False detaches hidden states for BCE; RL still updates the backbone.
+    success_update_backbone: true
+
     # fsdp, fsdp2 or megatron. fsdp backend used here.
     strategy: fsdp
 

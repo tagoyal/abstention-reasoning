@@ -328,6 +328,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     "bias": "none",
                 }
                 actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
+            if role == "actor" and self.config.actor.get("success_loss_weight") is not None:
+                from verl.utils.prefix_success import attach_success_head, validate_success_config
+
+                validate_success_config(
+                    self.config.actor.success_loss_weight,
+                    self.config.actor.success_interval,
+                    self.config.actor.success_update_backbone,
+                )
+                if self._is_lora or use_fused_kernels or use_liger:
+                    raise ValueError(
+                        "Prefix success requires full-parameter training without fused LM-head/Liger kernels"
+                    )
+                attach_success_head(
+                    actor_module,
+                    update_backbone=self.config.actor.success_update_backbone,
+                    model_path=local_path,
+                )
         torch.distributed.barrier()
 
         if self.rank == 0:
@@ -781,9 +798,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             with adapter_ctx:
-                output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+                result = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+                output, entropys = result[:2]
+                statistics = result[2] if data.meta_info.get("report_success", False) else {}
             output = DataProto.from_dict(
-                tensors={"old_log_probs": output, "entropys": entropys},
+                tensors={"old_log_probs": output, "entropys": entropys, **statistics},
                 meta_info={"temperature": self.config.rollout.temperature},
             )
             output = self.ulysses_sharding_manager.postprocess_data(output)

@@ -105,6 +105,9 @@ class Method:
     nested_request: bool = False  # Keep <request></request> inside the <think> block
                                   # instead of after it, so </think> stays the single
                                   # irreversible commit point right before <answer>.
+    success_loss_weight: float | None = None
+    success_interval: int = 10
+    success_update_backbone: bool = True
 
     # Backwards compatibility alias
     @property
@@ -164,6 +167,9 @@ class Method:
             max_hints=data.get("max_hints"),
             hint_transition=data.get("hint_transition", True),
             nested_request=data.get("nested_request", False),
+            success_loss_weight=data.get("success_loss_weight"),
+            success_interval=data.get("success_interval", 10),
+            success_update_backbone=data.get("success_update_backbone", True),
         )
 
     @staticmethod

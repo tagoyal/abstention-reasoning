@@ -330,7 +330,7 @@ def _create_prompts_single(
     # Determine format from output path
     fmt = "parquet" if str(output_path).endswith(".parquet") else "json"
     uses_fixed_hint_levels = (
-        method is not None and method.name in {"method_ac", "method_a"}
+        method is not None and method.name in {"method_ac", "method_a", "method_e"}
     )
     if uses_fixed_hint_levels and num_hints is None:
         raise ValueError(f"{method.name} requires --num-hints")
@@ -341,9 +341,12 @@ def _create_prompts_single(
 
     is_parquet = fmt == "parquet"
 
-    # Eval and every rl_* split cover every hint level (0..num_hints) per
-    # problem, rather than sampling HINT_LEVELS_PER_PROBLEM of them.
-    uses_all_hint_levels = split_name == "eval" or "rl_" in split_name
+    # Method E covers every hint level on every split; A/AC sample SFT levels.
+    uses_all_hint_levels = (
+        (method is not None and method.name == "method_e")
+        or split_name == "eval"
+        or "rl_" in split_name
+    )
 
     # Splits that cover every hint level emit up to num_hints + 1 records per
     # problem, so their record-index stride must be wide enough that indices

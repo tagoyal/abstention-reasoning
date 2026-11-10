@@ -328,6 +328,9 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                             f"in, using a generation config created from the model config when saving hf_model."
                         )
 
+                from verl.utils.prefix_success import save_success_head
+
+                save_success_head(state_dict, hf_local_path)
                 save_model.save_pretrained(hf_local_path, state_dict=state_dict)
                 log_with_rank(
                     f"Saved hf_model to {os.path.abspath(hf_local_path)}",

@@ -259,6 +259,9 @@ class BaseModelMerger(ABC):
             print(f"Saving lora adapter to {lora_path}")
 
         print(f"Saving model to {self.config.target_dir}")
+        from verl.utils.prefix_success import save_success_head
+
+        save_success_head(state_dict, self.config.target_dir)
         model.save_pretrained(self.config.target_dir, state_dict=state_dict)
         del state_dict
         del model

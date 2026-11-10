@@ -1177,6 +1177,9 @@ def train_rl(
     data_name: str | None = None,
     models_name: str | None = None,
     save_hint_bests: bool = False,
+    success_loss_weight: float | None = None,
+    success_interval: int | None = None,
+    success_update_backbone: bool | None = None,
 ) -> Path:
     """
     Train RL model using verl (GRPO algorithm).
@@ -1223,6 +1226,9 @@ def train_rl(
         models_name: Models directory name (default: data_name)
         save_hint_bests: Also retain winners for zero-hint validation accuracy and
             its equal-weight average with best_metric, plus the latest checkpoint.
+        success_loss_weight: Weight for prefix-success BCE (method_e default: 0.1).
+        success_interval: Predict success every L response tokens (default: 10).
+        success_update_backbone: Whether BCE also updates the backbone (default: True).
 
     Returns:
         Path to trained model
@@ -1369,6 +1375,23 @@ def train_rl(
                     raise ValueError(f"Invalid actor_rollout_ref.model.path in {saved_config_path}")
                 actor_model = saved_actor
 
+    saved_actor_config = saved_config.get("actor_rollout_ref", {}).get("actor", {}) if saved_config else {}
+    if success_loss_weight is None:
+        success_loss_weight = saved_actor_config.get(
+            "success_loss_weight", method.success_loss_weight if method else None
+        )
+    if success_interval is None:
+        success_interval = saved_actor_config.get(
+            "success_interval", method.success_interval if method else 10
+        )
+    if success_update_backbone is None:
+        success_update_backbone = saved_actor_config.get(
+            "success_update_backbone", method.success_update_backbone if method else True
+        )
+    from verl.utils.prefix_success import validate_success_config
+
+    validate_success_config(success_loss_weight, success_interval, success_update_backbone)
+
     # A prompts file that does not exist used to be handed straight to verl,
     # which then failed much later with an opaque error. Only explicitly-passed
     # paths can be missing here: the auto-derived val path above is assigned
@@ -1494,6 +1517,9 @@ def train_rl(
     print(f"Wandb: {wandb}")
     if save_hint_bests:
         print("Checkpoint retention: best reward/selected metric, best hint_0 accuracy, best combined, and latest")
+    if success_loss_weight is not None:
+        print(f"Prefix success: weight={success_loss_weight}, every {success_interval} tokens, "
+              f"update_backbone={success_update_backbone}")
     if template_content:
         print(f"Template: {method.template_variant}/rl.txt")
     print(f"=================================")
@@ -1612,6 +1638,12 @@ def train_rl(
             cmd.append(f"+custom_reward_function.reward_kwargs.{key}={value}")
 
     # Raw hydra overrides go last so they win over everything derived above.
+    if success_loss_weight is not None:
+        cmd.extend([
+            f"actor_rollout_ref.actor.success_loss_weight={success_loss_weight}",
+            f"actor_rollout_ref.actor.success_interval={success_interval}",
+            f"actor_rollout_ref.actor.success_update_backbone={success_update_backbone}",
+        ])
     if extra_overrides:
         cmd.extend(extra_overrides)
 

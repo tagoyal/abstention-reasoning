@@ -86,6 +86,27 @@ class TaskRunner:
 
         OmegaConf.resolve(config)
 
+        if config.actor_rollout_ref.actor.get("success_loss_weight") is not None:
+            from verl.utils.prefix_success import validate_success_config
+
+            actor = config.actor_rollout_ref.actor
+            validate_success_config(
+                actor.success_loss_weight, actor.success_interval, actor.success_update_backbone
+            )
+            if (
+                actor.strategy not in ("fsdp", "fsdp2")
+                or config.actor_rollout_ref.model.get("lora_rank", 0) > 0
+                or config.actor_rollout_ref.model.get("use_fused_kernels", False)
+                or config.actor_rollout_ref.model.get("use_liger", False)
+                or config.actor_rollout_ref.rollout.name != "vllm"
+                or config.actor_rollout_ref.rollout.mode != "sync"
+                or config.get("allow_hint", False)
+            ):
+                raise ValueError(
+                    "Prefix success currently supports full-parameter FSDP/FSDP2 with synchronous vLLM "
+                    "rollouts, no interactive hints, and unfused LM-head/Liger kernels"
+                )
+
         # Download the checkpoint from HDFS to the local machine.
         # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
         local_path = copy_to_local(

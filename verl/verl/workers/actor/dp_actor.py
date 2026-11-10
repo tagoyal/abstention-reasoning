@@ -32,6 +32,7 @@ from verl.trainer.ppo.core_algos import agg_loss, compute_policy_loss, get_polic
 from verl.utils.debug import GPUMemoryLogger
 from verl.utils.device import get_device_id, get_device_name, is_cuda_available, is_npu_available
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
+from verl.utils.prefix_success import prefix_success_loss, success_reporting_statistics
 from verl.utils.py_functional import append_to_dict
 from verl.utils.seqlen_balancing import get_reverse_idx, rearrange_micro_batches
 from verl.utils.torch_functional import logprobs_from_logits
@@ -56,6 +57,7 @@ class DataParallelPPOActor(BasePPOActor):
         super().__init__(config)
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
+        self.success_loss_weight = self.config.get("success_loss_weight")
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
         if torch.distributed.get_rank() == 0:
@@ -80,12 +82,13 @@ class DataParallelPPOActor(BasePPOActor):
         self.device_name = get_device_name()
 
     def _forward_micro_batch(
-        self, micro_batch, temperature, calculate_entropy=False
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self, micro_batch, temperature, calculate_entropy=False, calculate_success=False
+    ) -> Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Returns:
             entropy: # (bs, response_len)
             log_probs: # (bs, response_len)
+            success_logits: (bs, response_len), only when calculate_success=True
         """
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
@@ -175,6 +178,9 @@ class DataParallelPPOActor(BasePPOActor):
                     **extra_args,
                 )  # prevent model thinks we are generating
 
+                if calculate_success:
+                    success_rmpad = output.success_logits.squeeze(0)
+
                 if self.use_fused_kernels:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
                     entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
@@ -218,6 +224,10 @@ class DataParallelPPOActor(BasePPOActor):
                             unpad_dim=0,
                             padding_size=pad_size,
                         )
+                    if calculate_success:
+                        success_rmpad = gather_outpus_and_unpad(
+                            success_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size
+                        )
                 # pad back to (bsz, seqlen)
                 if calculate_entropy:
                     full_entropy = pad_input(
@@ -237,6 +247,14 @@ class DataParallelPPOActor(BasePPOActor):
                 if calculate_entropy:
                     entropy = full_entropy.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
                 log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
+                if calculate_success:
+                    full_success = pad_input(
+                        hidden_states=success_rmpad.unsqueeze(-1),
+                        indices=indices, batch=batch_size, seqlen=seqlen,
+                    )
+                    # Unlike next-token log-probs, success reads the state
+                    # AFTER each response token, not the state before it.
+                    success_logits = full_success.squeeze(-1)[:, -response_length:]
 
             else:  # not using rmpad and no ulysses sp
                 extra_args = {}
@@ -253,6 +271,9 @@ class DataParallelPPOActor(BasePPOActor):
                     **extra_args,
                 )  # prevent model thinks we are generating
 
+                if calculate_success:
+                    success_logits = output.success_logits[:, -response_length:]
+
                 if self.use_fused_kernels:
                     log_probs = output.log_probs[:, -response_length - 1 : -1]
                     entropy = output.entropy[:, -response_length - 1 : -1]  # (bsz, response_length)
@@ -266,6 +287,8 @@ class DataParallelPPOActor(BasePPOActor):
                     if calculate_entropy:
                         entropy = verl_F.entropy_from_logits(logits)  # (bsz, response_length)
 
+            if calculate_success:
+                return entropy, log_probs, success_logits
             return entropy, log_probs
 
     def _optimizer_step(self):
@@ -303,7 +326,8 @@ class DataParallelPPOActor(BasePPOActor):
                 ``responses``:  tensor of shape [batch_size, response_length]. torch.int64.
 
         Returns:
-            torch.Tensor: the log_prob tensor
+            Log-probabilities and optional entropy. With ``report_success`` in
+            meta_info, also return per-rollout success reporting statistics.
         """
         # set to eval
         self.actor_module.eval()
@@ -314,6 +338,8 @@ class DataParallelPPOActor(BasePPOActor):
 
         def _get_micro_batches(data: DataProto) -> Tuple[list, list | None]:
             select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+            if "response_mask" in data.batch:
+                select_keys.append("response_mask")
             batch = data.select(batch_keys=select_keys).batch
             has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch
 
@@ -350,13 +376,23 @@ class DataParallelPPOActor(BasePPOActor):
 
         log_probs_lst = []
         entropy_lst = []
+        report_success = data.meta_info.get("report_success", False)
+        success_statistics = []
         for micro_batch in micro_batches:
             if isinstance(micro_batch, DataProto):
                 micro_batch = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                entropy, log_probs = self._forward_micro_batch(
-                    micro_batch, temperature=temperature, calculate_entropy=calculate_entropy
+                result = self._forward_micro_batch(
+                    micro_batch, temperature=temperature, calculate_entropy=calculate_entropy,
+                    calculate_success=report_success,
                 )
+                entropy, log_probs = result[:2]
+                if report_success:
+                    response_length = micro_batch["responses"].shape[-1]
+                    mask = micro_batch.get("response_mask", micro_batch["attention_mask"][:, -response_length:])
+                    success_statistics.append(
+                        success_reporting_statistics(result[2], mask, self.config.success_interval)
+                    )
             log_probs_lst.append(log_probs)
             if calculate_entropy:
                 entropy_lst.append(entropy)
@@ -365,6 +401,12 @@ class DataParallelPPOActor(BasePPOActor):
         entropys = None
         if calculate_entropy:
             entropys = torch.concat(entropy_lst, dim=0)
+        statistics = {}
+        if report_success:
+            statistics = {
+                key: torch.cat([item[key] for item in success_statistics], dim=0)
+                for key in success_statistics[0]
+            }
         if use_dynamic_bsz:
             indices = list(itertools.chain.from_iterable(indices))
             assert len(indices) == log_probs.size(0), f"{len(indices)} vs. {log_probs.size()}"
@@ -372,7 +414,10 @@ class DataParallelPPOActor(BasePPOActor):
             log_probs = log_probs[revert_indices]
             if calculate_entropy:
                 entropys = entropys[revert_indices]
+            statistics = {key: value[revert_indices] for key, value in statistics.items()}
 
+        if report_success:
+            return log_probs, entropys, statistics
         return log_probs, entropys
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
@@ -393,6 +438,8 @@ class DataParallelPPOActor(BasePPOActor):
         ]
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
+        if self.success_loss_weight is not None:
+            select_keys.append("success_labels")
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
@@ -485,9 +532,15 @@ class DataParallelPPOActor(BasePPOActor):
                     calculate_entropy = False
                     if entropy_coeff != 0:
                         calculate_entropy = True
-                    entropy, log_prob = self._forward_micro_batch(
-                        micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy
-                    )
+                    if self.success_loss_weight is not None:
+                        entropy, log_prob, success_logits = self._forward_micro_batch(
+                            micro_batch=data, temperature=temperature,
+                            calculate_entropy=calculate_entropy, calculate_success=True,
+                        )
+                    else:
+                        entropy, log_prob = self._forward_micro_batch(
+                            micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy
+                        )
 
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
@@ -529,9 +582,21 @@ class DataParallelPPOActor(BasePPOActor):
                         micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item()
                         micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
+                    if self.success_loss_weight is not None:
+                        success_loss, success_metrics = prefix_success_loss(
+                            success_logits, response_mask, data["success_labels"],
+                            self.config.success_interval,
+                        )
+                        policy_loss = policy_loss + self.success_loss_weight * success_loss
+                        micro_batch_metrics.update(success_metrics)
+                        micro_batch_metrics["actor/success_loss_weight"] = self.success_loss_weight
+                        micro_batch_metrics["actor/success_update_backbone"] = float(
+                            self.config.success_update_backbone
+                        )
+
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
-                        loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
+                        loss = policy_loss * (response_mask.shape[0] / self.config.ppo_mini_batch_size)
                     else:
                         loss = policy_loss / self.gradient_accumulation
                     loss.backward()

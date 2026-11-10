@@ -1,0 +1,6 @@
+template_variant: method_ac
+reward_function: compute_score
+reward_kwargs: {}
+success_loss_weight: 0.1
+success_interval: 10
+success_update_backbone: true

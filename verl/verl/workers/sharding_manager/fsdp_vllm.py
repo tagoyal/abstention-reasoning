@@ -263,6 +263,9 @@ class FSDPVLLMShardingManager(BaseShardingManager):
         return data.chunk(chunks=self.tp_size)[self.tp_rank]
 
     def update_params(self, updated_params, peft_config=None):
+        # The auxiliary readout is trained/checkpointed by the actor, not used
+        # by vLLM's ordinary causal-LM rollout model.
+        updated_params = {k: v for k, v in updated_params.items() if not k.startswith("success_head.")}
         model = self.model_runner.model
         if peft_config:
             if self.base_sync_done:

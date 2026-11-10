@@ -60,6 +60,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.metric import (
     reduce_metrics,
 )
+from verl.utils.prefix_success import rollout_success_labels, success_reporting_metrics
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -683,6 +684,8 @@ class RayPPOTrainer:
         sample_outputs = []
         sample_scores = []
         sample_turns = []
+        success_statistics = []
+        success_labels = []
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -765,6 +768,18 @@ class RayPPOTrainer:
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
+            if self.config.actor_rollout_ref.actor.get("success_loss_weight") is not None:
+                if "response_mask" not in test_batch.batch:
+                    test_batch.batch["response_mask"] = compute_response_mask(test_batch)
+                test_batch.meta_info["report_success"] = True
+                padded, success_pad_size = pad_dataproto_to_divisor(test_batch, self.actor_rollout_wg.world_size)
+                report = self.actor_rollout_wg.compute_log_prob(padded)
+                report = unpad_dataproto(report, pad_size=success_pad_size)
+                success_statistics.append(
+                    {key: value for key, value in report.batch.items() if key.startswith("success_report_")}
+                )
+                success_labels.append(rollout_success_labels(result.get("reward_extra_info", {}), len(test_batch)))
+
             reward_extra_infos_dict["reward"].extend(scores)
             print(f"len reward_extra_infos_dict['reward']: {len(reward_extra_infos_dict['reward'])}")
             if "reward_extra_info" in result:
@@ -798,6 +813,12 @@ class RayPPOTrainer:
 
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
         metric_dict = compute_validation_hint_metrics(reward_extra_infos_dict)
+        if success_statistics:
+            statistics = {
+                key: torch.cat([item[key] for item in success_statistics], dim=0)
+                for key in success_statistics[0]
+            }
+            metric_dict.update(success_reporting_metrics(statistics, torch.cat(success_labels), "val/success"))
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
             for var_name, metric2val in var2metric2val.items():
@@ -1370,7 +1391,11 @@ class RayPPOTrainer:
 
                     # recompute old_log_probs
                     with marked_timer("old_log_prob", timing_raw, color="blue"):
+                        batch.meta_info["report_success"] = (
+                            self.config.actor_rollout_ref.actor.get("success_loss_weight") is not None
+                        )
                         old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
+                        batch.meta_info.pop("report_success", None)
                         entropys = old_log_prob.batch["entropys"]
                         response_masks = batch.batch["response_mask"]
                         loss_agg_mode = self.config.actor_rollout_ref.actor.loss_agg_mode
@@ -1428,6 +1453,18 @@ class RayPPOTrainer:
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+
+                        if self.config.actor_rollout_ref.actor.get("success_loss_weight") is not None:
+                            batch.batch["success_labels"] = rollout_success_labels(
+                                reward_extra_infos_dict, len(batch), device=reward_tensor.device
+                            )
+                            statistics = {
+                                key: batch.batch.pop(key)
+                                for key in list(batch.batch.keys()) if key.startswith("success_report_")
+                            }
+                            metrics.update(
+                                success_reporting_metrics(statistics, batch.batch["success_labels"], "actor/success")
+                            )
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:

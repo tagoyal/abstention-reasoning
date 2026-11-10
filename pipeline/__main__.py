@@ -505,6 +505,9 @@ def cmd_train_rl(args):
         save_best=args.save_best,
         best_metric=args.best_metric,
         save_hint_bests=args.save_hint_bests,
+        success_loss_weight=args.success_loss_weight,
+        success_interval=args.success_interval,
+        success_update_backbone=args.success_update_backbone,
         max_ckpt_to_keep=args.max_ckpt_to_keep,
         data_name=args.data_name,
         models_name=args.models_name,
@@ -572,8 +575,9 @@ def main():
     p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
     p.add_argument("--num-hints", type=int, default=None,
-        help="Maximum hint level. method_ac samples one level for SFT/RL and "
-             "creates every level for eval; other methods include the first N hints.")
+        help="Maximum hint level. method_e creates every level on every split; "
+             "method_ac/method_a sample up to two levels for SFT and create every "
+             "level for RL/eval; other methods include the first N hints.")
     p.add_argument("--json", action="store_true", help="Force JSON output for all splits (instead of parquet for RL)")
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.set_defaults(func=cmd_create_prompts)
@@ -936,6 +940,13 @@ def main():
     p.add_argument("--total-steps", type=int, default=400, help="Total training steps")
     p.add_argument("--kl-coef", type=float, default=0.001, help="KL divergence coefficient")
     p.add_argument("--n-samples", type=int, default=8, help="Number of samples per prompt (group size)")
+    p.add_argument("--success-loss-weight", type=float, default=None,
+                   help="Prefix-success BCE weight (method_e: 0.1; other methods: disabled). Zero ablates BCE.")
+    p.add_argument("--success-interval", type=int, default=None,
+                   help="Predict terminal correctness every L response tokens (default: 10)")
+    p.add_argument("--success-update-backbone", action=argparse.BooleanOptionalAction, default=None,
+                   help="Let BCE update the backbone as well as the success head (default: true). "
+                        "--no-success-update-backbone trains only the head from BCE; RL is unchanged.")
     p.add_argument("--save-freq", type=int, default=None, help="Checkpoint save frequency (default: 25, or off when --save-best is set)")
     p.add_argument("--test-freq", type=int, default=None, help="Validation/logging frequency (default: same as save-freq)")
     p.add_argument("--max-prompt-length", type=int, default=2048, help="Maximum prompt length in tokens")
