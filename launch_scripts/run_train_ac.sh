@@ -31,7 +31,7 @@ fi
 if [[ "${TASK}" == "math" ]]; then
   BASE_MODEL_DATA_NAME="math_o3"
 elif [[ "${TASK}" == "sql" ]]; then
-  BASE_MODEL_DATA_NAME="sql_partial_sols"
+  BASE_MODEL_DATA_NAME="sql_2"
 else
   BASE_MODEL_DATA_NAME="${DATA_NAME}"
 fi
