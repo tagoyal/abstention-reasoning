@@ -61,7 +61,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.metric import (
     reduce_metrics,
 )
-from verl.utils.prefix_success import rollout_success_labels, success_reporting_metrics
+from verl.utils.prefix_success import rollout_success_labels, success_policy_metrics, success_reporting_metrics
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
@@ -688,6 +688,21 @@ class RayPPOTrainer:
         success_statistics = []
         success_labels = []
         hint_metrics_source = OmegaConf.select(self.config, "data.hint_metrics_source", default="rollout")
+        report_policy = (
+            self.config.actor_rollout_ref.actor.get("success_loss_weight") is not None
+            and hint_metrics_source == "prompt"
+        )
+        policy_records = []
+        self.success_policy_frontier = None
+        expected_policy_levels = None
+        if report_policy and hasattr(getattr(self, "val_dataset", None), "data_files"):
+            import pyarrow.parquet as pq
+
+            expected_policy_levels = defaultdict(set)
+            for path in self.val_dataset.data_files:
+                rows = pq.read_table(path, columns=["data_source", "source_index", "hint_level"]).to_pylist()
+                for row in rows:
+                    expected_policy_levels[(row["data_source"], row["source_index"])].add(row["hint_level"])
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -781,6 +796,17 @@ class RayPPOTrainer:
                     {key: value for key, value in report.batch.items() if key.startswith("success_report_")}
                 )
                 success_labels.append(rollout_success_labels(result.get("reward_extra_info", {}), len(test_batch)))
+                if report_policy:
+                    if "source_index" not in test_batch.non_tensor_batch:
+                        raise ValueError("Method E policy replay requires source_index in validation prompts")
+                    sources = test_batch.non_tensor_batch.get("data_source", ["unknown"] * len(test_batch))
+                    policy_records.extend(zip(
+                        sources,
+                        test_batch.non_tensor_batch["source_index"],
+                        test_batch.non_tensor_batch["hint_level"].tolist(),
+                        success_labels[-1].tolist(),
+                        report.batch["success_report_min_probability"].tolist(),
+                    ))
 
             reward_extra_infos_dict["reward"].extend(scores)
             print(f"len reward_extra_infos_dict['reward']: {len(reward_extra_infos_dict['reward'])}")
@@ -825,6 +851,11 @@ class RayPPOTrainer:
                 for key in success_statistics[0]
             }
             metric_dict.update(success_reporting_metrics(statistics, torch.cat(success_labels), "val/success"))
+        if report_policy:
+            policy_metrics, self.success_policy_frontier = success_policy_metrics(
+                policy_records, self.config.actor_rollout_ref.rollout.val_kwargs.n, expected_policy_levels
+            )
+            metric_dict.update(policy_metrics)
         for data_source, var2metric2val in data_src2var2metric2val.items():
             core_var = "acc" if "acc" in var2metric2val else "reward"
             for var_name, metric2val in var2metric2val.items():
@@ -1244,7 +1275,10 @@ class RayPPOTrainer:
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
-            logger.log(data=val_metrics, step=self.global_steps)
+            logger.log(
+                data=val_metrics, step=self.global_steps,
+                success_policy_frontier=getattr(self, "success_policy_frontier", None),
+            )
             if self.config.trainer.get("val_only", False):
                 return
 
@@ -1605,7 +1639,13 @@ class RayPPOTrainer:
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
                 # TODO: make a canonical logger that supports various backend
-                logger.log(data=metrics, step=self.global_steps)
+                logger.log(
+                    data=metrics, step=self.global_steps,
+                    success_policy_frontier=(
+                        getattr(self, "success_policy_frontier", None)
+                        if "val/success_policy/accuracy_at_0" in metrics else None
+                    ),
+                )
 
                 progress_bar.update(1)
                 self.global_steps += 1

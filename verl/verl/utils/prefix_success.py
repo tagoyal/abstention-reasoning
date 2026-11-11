@@ -1,6 +1,7 @@
 """Prefix-success prediction alongside an unchanged causal-LM trajectory."""
 
 import math
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +40,10 @@ def success_reporting_statistics(logits, response_mask, interval):
         "success_report_count": torch.stack(counts, dim=-1),
         "success_report_sum": torch.stack(sums, dim=-1),
         "success_report_squared_sum": torch.stack(squared_sums, dim=-1),
+        # A finished response is accepted before checking whether to decode more.
+        "success_report_min_probability": probabilities.masked_fill(
+            ~(points & (positions < valid.sum(-1, keepdim=True))), float("inf")
+        ).amin(-1),
     }
 
 
@@ -54,16 +59,98 @@ def success_reporting_metrics(statistics, labels, prefix):
     for i, (name, _, _) in enumerate(SUCCESS_POSITION_BUCKETS):
         key = f"{prefix}/{name}"
         contributing = counts[:, i] > 0
-        metrics[f"{key}/rollouts"] = contributing.sum().item()
-        metrics[f"{key}/prediction_points"] = counts[:, i].sum().item()
         if contributing.any():
             metrics[f"{key}/brier"] = brier[contributing, i].mean().item()
         for label, group in ((1, "correct"), (0, "incorrect")):
             mask = contributing & (labels == label)
-            metrics[f"{key}/{group}_rollouts"] = mask.sum().item()
             if mask.any():
                 metrics[f"{key}/prob_{group}"] = probabilities[mask, i].mean().item()
     return metrics
+
+
+def success_policy_metrics(records, samples_per_prompt=1, expected_levels=None):
+    """Replay full validation continuations; pair the nth sample across hint levels.
+
+    Records are (data_source, source_index, hint_level, correct, min_probability).
+    The minimum over pre-completion prediction points is sufficient to determine
+    whether the first threshold crossing occurs before the response finishes.
+    """
+    grouped = defaultdict(lambda: defaultdict(list))
+    for data_source, source_index, level, correct, minimum in records:
+        if isinstance(level, bool) or not isinstance(level, int) or level < 0:
+            raise ValueError("Policy replay requires non-negative integer hint levels")
+        if correct not in (0, 1) or math.isnan(minimum) or minimum < 0 or (minimum > 1 and minimum != math.inf):
+            raise ValueError("Policy replay requires binary correctness and valid success probabilities")
+        grouped[(data_source, source_index)][level].append((bool(correct), minimum))
+    if not grouped:
+        raise ValueError("Policy replay requires validation trajectories")
+    if expected_levels is not None and set(grouped) != set(expected_levels):
+        raise ValueError("Policy validation lost problems during prompt filtering; use complete hint chains")
+
+    zero_correct, zero_minimum, chains = [], [], []
+    for source, levels in grouped.items():
+        expected = set(range(max(levels) + 1)) if expected_levels is None else expected_levels[source]
+        if set(levels) != expected or expected != set(range(max(expected) + 1)):
+            raise ValueError(f"Policy replay requires every hint level from 0 to max for {source}")
+        if any(len(samples) != samples_per_prompt for samples in levels.values()):
+            raise ValueError(f"Policy replay requires {samples_per_prompt} samples at every hint level for {source}")
+        for sample in range(samples_per_prompt):
+            chain = [levels[level][sample] for level in range(len(levels))]
+            chains.append(chain)
+            zero_correct.append(chain[0][0])
+            # At max hints the controller must accept, even if confidence is low.
+            zero_minimum.append(chain[0][1] if len(chain) > 1 else math.inf)
+
+    # Use float32 successors so the deployed float32 comparison also rejects
+    # the observed minimum; a float64 epsilon would round back to that minimum.
+    minima = torch.tensor(zero_minimum, dtype=torch.float32)
+    successors = torch.nextafter(minima[minima < 1], torch.tensor(math.inf)).tolist()
+    thresholds = sorted({0.0, *successors})
+    ordered = sorted(zip(zero_minimum, zero_correct, strict=True))
+    removed = 0
+    accepted_count = len(chains)
+    accepted_correct = sum(zero_correct)
+    best = None
+    best_key = None
+    for threshold in thresholds:
+        while removed < len(ordered) and ordered[removed][0] < threshold:
+            accepted_correct -= ordered[removed][1]
+            accepted_count -= 1
+            removed += 1
+        if not accepted_count:
+            continue
+        accuracy = accepted_correct / len(chains)
+        precision = accepted_correct / accepted_count
+        # Prefer retaining more correct answers, then the lower threshold on ties.
+        key = ((accuracy + precision) / 2, accuracy, -threshold)
+        if best_key is None or key > best_key:
+            best_key = key
+            best = (threshold, accuracy, precision)
+
+    threshold, accuracy, precision = best
+
+    def replay(tau):
+        successes, hints = 0, 0
+        for chain in chains:
+            for level, (is_correct, probability) in enumerate(chain):
+                if level == len(chain) - 1 or probability >= tau:
+                    successes += is_correct
+                    hints += level
+                    break
+        return successes / len(chains), hints / len(chains)
+
+    final_accuracy, mean_hints = replay(threshold)
+    metrics = {
+        "val/success_policy/accuracy_at_0": accuracy,
+        "val/success_policy/precision_at_0": precision,
+        "val/success_policy/final_accuracy": final_accuracy,
+        "val/success_policy/mean_hints": mean_hints,
+        "val/success_policy/threshold": threshold,
+    }
+    # A compact threshold sweep for one secondary accuracy-vs-hints chart.
+    frontier_thresholds = sorted({i / 100 for i in range(101)} | {threshold})
+    frontier = [(tau, *replay(tau)) for tau in frontier_thresholds]
+    return metrics, frontier
 
 
 @dataclass
@@ -180,7 +267,6 @@ def prefix_success_loss(logits, response_mask, labels, interval):
             "actor/success_loss": loss.item(),
             "actor/success_accuracy": accuracy.item(),
             "actor/success_brier": brier.item(),
-            "actor/success_prediction_points_per_rollout": counts.float().mean().item(),
             "actor/success_positive_rate": labels.float().mean().item(),
         }
     return loss, metrics

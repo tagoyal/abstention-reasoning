@@ -16,6 +16,7 @@ A unified tracking interface that supports logging data to different backend
 """
 
 import dataclasses
+import json
 import os
 from enum import Enum
 from functools import partial
@@ -23,13 +24,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Union
 
 IMPORTANT_METRICS = frozenset(
-    ["critic/score/mean", "val/accuracy/hint_0", "actor/success_accuracy", "actor/success_brier"]
+    ["critic/score/mean", "val/accuracy/hint_0"]
     + [
         f"{prefix}{metric}{i}"
         for prefix in ("", "val/")
         for metric in ("precision/hints_", "rollout/num_hints/pct_")
         for i in range(3)
     ]
+)
+POLICY_IMPORTANT_METRICS = frozenset(
+    f"val/success_policy/{name}" for name in ("accuracy_at_0", "precision_at_0", "final_accuracy", "mean_hints")
 )
 
 
@@ -58,6 +62,14 @@ class Tracking:
                 assert backend in self.supported_backend, f"{backend} is not supported"
 
         self.logger = {}
+        self.success_policy_run = bool(
+            config
+            and config.get("actor_rollout_ref", {}).get("actor", {}).get("success_loss_weight") is not None
+            and config.get("data", {}).get("hint_metrics_source") == "prompt"
+        )
+        self.success_diagnostics_history = {}
+        self.success_diagnostics_path = None
+        self.success_diagnostics_reconciled = False
 
         if "tracking" in default_backend or "wandb" in default_backend:
             import wandb
@@ -78,6 +90,13 @@ class Tracking:
                 resume="allow" if run_id else None,
             )
             self.logger["wandb"] = wandb
+            checkpoint_dir = config.get("trainer", {}).get("default_local_dir") if config else None
+            if checkpoint_dir:
+                self.success_diagnostics_path = Path(checkpoint_dir) / "success_diagnostics_history.json"
+                if self.success_diagnostics_path.exists():
+                    saved = json.loads(self.success_diagnostics_path.read_text())
+                    if saved.get("run_id") == wandb.run.id:
+                        self.success_diagnostics_history = saved["history"]
 
         if "mlflow" in default_backend:
             import os
@@ -149,20 +168,85 @@ class Tracking:
         if "clearml" in default_backend:
             self.logger["clearml"] = ClearMLLogger(project_name, experiment_name, config)
 
-    def log(self, data, step, backend=None):
+    def _success_diagnostics(self, data, step, wandb):
+        history = self.success_diagnostics_history
+        if not self.success_diagnostics_reconciled:
+            for key, values in history.items():
+                history[key] = {saved_step: value for saved_step, value in values.items() if int(saved_step) < step}
+            self.success_diagnostics_reconciled = True
+        updated = set()
+        for key, value in data.items():
+            if key.startswith(("actor/success/", "val/success/")):
+                history.setdefault(key, {})[str(step)] = float(value)
+                updated.add(key.split("/", 1)[0])
+        charts = {}
+        for prefix in sorted(updated):
+            scope = "train" if prefix == "actor" else "val"
+            bucket_names = sorted({key.split("/")[2] for key in history if key.startswith(f"{prefix}/success/")})
+            for bucket in bucket_names:
+                series = [
+                    (group, history.get(f"{prefix}/success/{bucket}/prob_{group}", {}))
+                    for group in ("correct", "incorrect")
+                ]
+                series = [(name, values) for name, values in series if values]
+                if series:
+                    charts[f"success_diagnostics/{scope}_prob_{bucket}"] = wandb.plot.line_series(
+                        xs=[sorted(int(step) for step in values) for _, values in series],
+                        ys=[
+                            [values[step] for step in sorted(values, key=int)]
+                            for _, values in series
+                        ],
+                        keys=[name for name, _ in series],
+                        title=f"{scope}: P(success), {bucket}",
+                        xname="Training step",
+                        split_table=True,
+                    )
+            brier = [
+                (bucket, history[f"{prefix}/success/{bucket}/brier"])
+                for bucket in bucket_names if f"{prefix}/success/{bucket}/brier" in history
+            ]
+            if brier:
+                charts[f"success_diagnostics/{scope}_brier"] = wandb.plot.line_series(
+                    xs=[sorted(int(step) for step in values) for _, values in brier],
+                    ys=[[values[step] for step in sorted(values, key=int)] for _, values in brier],
+                    keys=[bucket for bucket, _ in brier],
+                    title=f"{scope}: Brier score by prefix position",
+                    xname="Training step",
+                    split_table=True,
+                )
+        if updated and self.success_diagnostics_path is not None:
+            path = self.success_diagnostics_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"run_id": wandb.run.id, "history": history}))
+            temporary.replace(path)
+        return charts
+
+    def log(self, data, step, backend=None, success_policy_frontier=None):
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
                 if default_backend == "wandb":
+                    important_keys = POLICY_IMPORTANT_METRICS if self.success_policy_run else IMPORTANT_METRICS
                     important = {
                         f"important/{key}": value
                         for key, value in data.items()
-                        if key in IMPORTANT_METRICS
-                        or (
-                            key.startswith(("actor/success/", "val/success/"))
-                            and key.rsplit("/", 1)[-1] in {"brier", "prob_correct", "prob_incorrect"}
-                        )
+                        if key in important_keys
                     }
-                    logger_instance.log(data={**data, **important}, step=step)
+                    logged = {
+                        key: value for key, value in data.items()
+                        if not key.startswith(("actor/success/", "val/success/"))
+                    }
+                    charts = self._success_diagnostics(data, step, logger_instance)
+                    if success_policy_frontier is not None:
+                        table = logger_instance.Table(
+                            columns=["threshold", "final_accuracy", "mean_hints"],
+                            data=success_policy_frontier,
+                        )
+                        charts["success_diagnostics/accuracy_vs_hints"] = logger_instance.plot.line(
+                            table, x="mean_hints", y="final_accuracy",
+                            title="Validation threshold sweep: accuracy vs hints", split_table=True,
+                        )
+                    logger_instance.log(data={**logged, **important, **charts}, step=step)
                 else:
                     logger_instance.log(data=data, step=step)
 
