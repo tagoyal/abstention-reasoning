@@ -104,7 +104,26 @@ def compute_hint_metrics(num_hints, correct=None) -> Dict[str, Any]:
     return metrics
 
 
-def compute_validation_hint_metrics(reward_extra_infos: Dict[str, list]) -> Dict[str, Any]:
+def hint_metrics_reward_info(batch: DataProto, reward_extra_info: dict, source: str = "rollout") -> dict:
+    """Select reporting hint counts without changing the already-computed rewards."""
+    if source == "rollout":
+        return reward_extra_info
+    if source != "prompt":
+        raise ValueError(f"Unknown hint_metrics_source: {source}")
+    levels = batch.non_tensor_batch.get("hint_level")
+    if levels is None or np.asarray(levels).shape != (len(batch),):
+        raise ValueError("Prompt hint metrics require one hint_level per rollout")
+    if any(
+        isinstance(level, (bool, np.bool_)) or not isinstance(level, (int, np.integer)) or level < 0
+        for level in levels
+    ):
+        raise ValueError("Prompt hint_level values must be non-negative integers")
+    return {**reward_extra_info, "num_hints": np.asarray(levels, dtype=np.int64).tolist()}
+
+
+def compute_validation_hint_metrics(
+    reward_extra_infos: Dict[str, list], fixed_hint_levels: bool = False
+) -> Dict[str, Any]:
     """Aggregate validation hint metrics across the entire validation dataset."""
     hints = reward_extra_infos.get("num_hints")
     if hints is None:
@@ -112,10 +131,14 @@ def compute_validation_hint_metrics(reward_extra_infos: Dict[str, list]) -> Dict
     correct = reward_extra_infos.get("correct")
     metrics = {f"val/{key}": value for key, value in compute_hint_metrics(hints, correct).items()}
     if correct is not None and len(hints) > 0:
-        # Every question has the same number of sampled answers, so this mean
-        # equals averaging answers per question and then averaging questions.
-        zero_hint_correct = np.asarray(correct, dtype=bool) & (np.asarray(hints) == 0)
-        metrics["val/accuracy/hint_0"] = float(zero_hint_correct.mean())
+        zero_hint = np.asarray(hints) == 0
+        correct_arr = np.asarray(correct, dtype=bool)
+        if fixed_hint_levels:
+            if zero_hint.any():
+                metrics["val/accuracy/hint_0"] = float(correct_arr[zero_hint].mean())
+        else:
+            # Interactive methods report zero-hint success as a fraction of all rollouts.
+            metrics["val/accuracy/hint_0"] = float((correct_arr & zero_hint).mean())
     return metrics
 
 

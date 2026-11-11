@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Union
 
 IMPORTANT_METRICS = frozenset(
-    ["critic/score/mean", "val/accuracy/hint_0"]
+    ["critic/score/mean", "val/accuracy/hint_0", "actor/success_accuracy", "actor/success_brier"]
     + [
         f"{prefix}{metric}{i}"
         for prefix in ("", "val/")
@@ -153,7 +153,15 @@ class Tracking:
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
                 if default_backend == "wandb":
-                    important = {f"important/{key}": value for key, value in data.items() if key in IMPORTANT_METRICS}
+                    important = {
+                        f"important/{key}": value
+                        for key, value in data.items()
+                        if key in IMPORTANT_METRICS
+                        or (
+                            key.startswith(("actor/success/", "val/success/"))
+                            and key.rsplit("/", 1)[-1] in {"brier", "prob_correct", "prob_incorrect"}
+                        )
+                    }
                     logger_instance.log(data={**data, **important}, step=step)
                 else:
                     logger_instance.log(data=data, step=step)

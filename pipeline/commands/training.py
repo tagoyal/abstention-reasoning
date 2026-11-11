@@ -1550,6 +1550,7 @@ def train_rl(
         f"data.val_batch_size={val_batch_size}",
         f"data.max_prompt_length={max_prompt_length}",
         f"data.max_response_length={max_response_length}",
+        f"data.hint_metrics_source={'prompt' if method_name in {'method_ac', 'method_e'} else 'rollout'}",
         f"custom_reward_function.path={reward_function_path}",
         f"custom_reward_function.name={reward_function_name}",
         f"actor_rollout_ref.model.path={actor_model}",

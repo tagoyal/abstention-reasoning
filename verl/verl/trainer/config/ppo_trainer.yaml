@@ -31,6 +31,9 @@ data:
   # The field used to select the reward function (if using different ones per example).
   reward_fn_key: data_source
 
+  # Hint-grouped reporting uses rollout exchanges, or the input hint_level for fixed-hint solvers.
+  hint_metrics_source: rollout
+
   # Maximum prompt length. All prompts will be left-padded to this length.
   # An error will be reported if the length is too long.
   max_prompt_length: 512

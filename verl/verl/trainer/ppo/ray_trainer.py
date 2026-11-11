@@ -52,6 +52,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_throughout_metrics,
     compute_timing_metrics,
     compute_validation_hint_metrics,
+    hint_metrics_reward_info,
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
@@ -686,6 +687,7 @@ class RayPPOTrainer:
         sample_turns = []
         success_statistics = []
         success_labels = []
+        hint_metrics_source = OmegaConf.select(self.config, "data.hint_metrics_source", default="rollout")
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -782,10 +784,12 @@ class RayPPOTrainer:
 
             reward_extra_infos_dict["reward"].extend(scores)
             print(f"len reward_extra_infos_dict['reward']: {len(reward_extra_infos_dict['reward'])}")
-            if "reward_extra_info" in result:
-                for key, lst in result["reward_extra_info"].items():
-                    reward_extra_infos_dict[key].extend(lst)
-                    print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
+            reward_extra_info = hint_metrics_reward_info(
+                test_batch, result.get("reward_extra_info", {}), hint_metrics_source
+            )
+            for key, lst in reward_extra_info.items():
+                reward_extra_infos_dict[key].extend(lst)
+                print(f"len reward_extra_infos_dict['{key}']: {len(reward_extra_infos_dict[key])}")
 
             # collect num_turns of each prompt
             if "__num_turns__" in test_batch.non_tensor_batch:
@@ -812,7 +816,9 @@ class RayPPOTrainer:
         data_sources = np.concatenate(data_source_lst, axis=0)
 
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_inputs, reward_extra_infos_dict)
-        metric_dict = compute_validation_hint_metrics(reward_extra_infos_dict)
+        metric_dict = compute_validation_hint_metrics(
+            reward_extra_infos_dict, fixed_hint_levels=hint_metrics_source == "prompt"
+        )
         if success_statistics:
             statistics = {
                 key: torch.cat([item[key] for item in success_statistics], dim=0)
@@ -1451,6 +1457,10 @@ class RayPPOTrainer:
                             reward_tensor, reward_extra_infos_dict = ray.get(future_reward)
                         batch.batch["token_level_scores"] = reward_tensor
 
+                        reward_extra_infos_dict = hint_metrics_reward_info(
+                            batch, reward_extra_infos_dict,
+                            OmegaConf.select(self.config, "data.hint_metrics_source", default="rollout"),
+                        )
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
 
