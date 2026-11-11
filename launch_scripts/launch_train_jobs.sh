@@ -24,9 +24,10 @@ set -euo pipefail
 #   done
 # done
 
-TASKS=(math)
-DATA_NAME=math_o3
-MODELS=(qwen2.5-1.5b qwen2.5-3b qwen3-4b)
+TASKS=(countdown)
+DATA_NAME=countdown
+SUCCESS_UPDATE_BACKBONE=true
+MODELS=(qwen2.5-1.5b) #qwen2.5-3b qwen3-4b) # 
 ALPHA=2
 BASE=0.1
 
@@ -60,7 +61,7 @@ for TASK in "${TASKS[@]}"; do
   for MODEL in "${MODELS[@]}"; do
     HF_MODEL="${MODEL_MAP[$MODEL]}"
     GPUS="${GPU_MAP[$MODEL]}"
-    sed "s|__TASK__|${TASK}|; s|__MODEL__|${MODEL}|; s|__HF_MODEL__|${HF_MODEL}|; s|__GPUS__|${GPUS}|; s|__DATA_NAME__|${DATA_NAME}|; s|__ALPHA__|${ALPHA}|; s|__BASE__|${BASE}|" launch_scripts/submit_train_template.yaml \
+    sed "s|__TASK__|${TASK}|; s|__MODEL__|${MODEL}|; s|__HF_MODEL__|${HF_MODEL}|; s|__GPUS__|${GPUS}|; s|__DATA_NAME__|${DATA_NAME}|; s|__SUCCESS_UPDATE_BACKBONE__|${SUCCESS_UPDATE_BACKBONE}|" launch_scripts/submit_train_template.yaml \
       | kubectl create -f -
   done
 done

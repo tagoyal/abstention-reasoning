@@ -49,7 +49,7 @@ spec:
           command:
           - /bin/bash
           - -lc
-          - source /data/tanyagoyal/models/initialization_script.sh && bash launch_scripts/run_method_e.sh __TASK__ __MODEL__ __HF_MODEL__ __DATA_NAME__ __ALPHA__ __BASE__ --interleave-rl
+          - source /data/tanyagoyal/models/initialization_script.sh && bash launch_scripts/run_train_e.sh __TASK__ __MODEL__ __HF_MODEL__ __DATA_NAME__ __SUCCESS_UPDATE_BACKBONE__
 
           volumeMounts:
           - name: data
