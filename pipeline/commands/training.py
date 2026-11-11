@@ -21,9 +21,14 @@ def _model_project_tag(model_path: str) -> str:
         "Qwen/Qwen3-4B"           -> "qwen3-4b"
         ".../sft/qwen3-4b-up4x/model" -> "qwen3-4b"
         ".../sft/qwen2.5-1.5b/model"  -> "qwen2.5-1.5b"
+        ".../sft/qwen2.5-1.5b/best"   -> "qwen2.5-1.5b"
+        ".../sft/qwen3-4b/last/model" -> "qwen3-4b"
         ".../rl/default/model"         -> "default"
     """
-    name = _get_model_short_name(model_path)
+    parts = model_path.rstrip("/").split("/")
+    while len(parts) > 1 and parts[-1] in {"model", "best", "last"}:
+        parts.pop()
+    name = _get_model_short_name("/".join(parts))
     # Truncate after model size indicator (e.g., "qwen3-4b-up4x" -> "qwen3-4b")
     match = re.match(r'(.*?\d+\.?\d*b)', name, re.IGNORECASE)
     return match.group(1) if match else name
