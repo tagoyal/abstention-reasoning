@@ -24,13 +24,13 @@ if [[ "${MODEL,,}" == *qwen3* ]]; then
   STRIP_THINK="--strip-think-tokens"
 fi
 
-python -m pipeline train_sft \
-  --task "${TASK}" \
-  --method baseline \
-  --run-id "${RUN_ID}" \
-  --base-model "${HF_MODEL}" \
-  --data-name "${DATA_NAME}" \
-  ${STRIP_THINK}
+# python -m pipeline train_sft \
+#   --task "${TASK}" \
+#   --method baseline \
+#   --run-id "${RUN_ID}" \
+#   --base-model "${HF_MODEL}" \
+#   --data-name "${DATA_NAME}" \
+#   ${STRIP_THINK}
 
 python -m pipeline train_rl \
   --task "${TASK}" \
