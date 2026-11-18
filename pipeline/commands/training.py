@@ -131,6 +131,7 @@ def train_sft(
     base_model: str,
     method_name: str | None = None,
     run_id: str | None = None,
+    compose_k: int | None = None,
     dataset_path: Path | None = None,
     eval_dataset_path: Path | None = None,
     output_path: Path | None = None,
@@ -204,6 +205,7 @@ def train_sft(
     method = None
     if method_name is not None:
         method = Method.load(method_name, task_name)
+        method.set_compose_k(compose_k)
 
     # Default dataset path - look for the method's generated sft_train dataset
     if dataset_path is None:
@@ -1145,6 +1147,7 @@ def train_rl(
     task_name: str,
     method_name: str | None = None,
     run_id: str | None = None,
+    compose_k: int | None = None,
     base_model: str | None = None,
     train_prompts_path: Path | None = None,
     val_prompts_path: Path | None = None,
@@ -1259,11 +1262,9 @@ def train_rl(
     method = None
     if method_name is not None:
         method = Method.load(method_name, task_name)
-        if method.composed:
-            raise NotImplementedError(
-                f"train_rl does not support composed method '{method.name}' yet: "
-                "the verl reward function scores a single <answer> tag, not <answer_i> tags."
-            )
+        method.set_compose_k(compose_k)
+        if method.composed and method.multi_turn:
+            raise NotImplementedError("composed methods do not support multi-turn rollouts")
 
     # Validate mutual exclusion
     if base_model is not None and sft_model_path is not None:
@@ -1483,6 +1484,14 @@ def train_rl(
                 f"Reward function not found at verl/recipe/{task_name}/. "
                 f"Please provide --reward-function."
             )
+
+    # Composed rollouts answer K subproblems; the shared wrapper splits them and
+    # scores each with the scorer the method would use uncomposed.
+    if method is not None and method.composed:
+        reward_kwargs["base_reward_path"] = str(Path(reward_function_path).resolve())
+        reward_kwargs["base_reward_name"] = reward_function_name
+        reward_function_path = repo_root / "verl/recipe/shared/composed_reward.py"
+        reward_function_name = "compute_score"
 
     # Create output directories
     checkpoints_dir.mkdir(parents=True, exist_ok=True)

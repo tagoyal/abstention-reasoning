@@ -386,6 +386,7 @@ def cmd_train_sft(args):
         base_model=args.base_model,
         method_name=args.method,
         run_id=getattr(args, "run_id", None),
+        compose_k=args.compose_k,
         dataset_path=dataset_path,
         eval_dataset_path=eval_dataset_path,
         output_path=output_path,
@@ -474,6 +475,7 @@ def cmd_train_rl(args):
         task_name=args.task,
         method_name=args.method,
         run_id=args.run_id,
+        compose_k=args.compose_k,
         base_model=args.base_model,
         train_prompts_path=train_prompts_path,
         val_prompts_path=val_prompts_path,
@@ -855,6 +857,8 @@ def main():
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--base-model", required=True, help="Base model to fine-tune")
     p.add_argument("--method", help="Method name for auto-derived paths")
+    p.add_argument("--compose-k", type=int, default=None,
+        help="Composed methods: problems per datapoint; selects the __k{K} prompt/dataset files.")
     p.add_argument("--run-id", help="Run identifier: names the run directory under models/{method}_{sft,rl}/. Required with --method; nothing is derived from the base checkpoint.")
     p.add_argument("--dataset", help="Path to generated dataset (default: auto-detect from method)")
     p.add_argument("--eval-dataset", help="Path to held-out dataset for validation loss "
@@ -931,6 +935,8 @@ def main():
     p = subparsers.add_parser("train_rl", help="Train RL model using verl (GRPO)")
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--method", help="Method name for auto-derived paths, template, and reward config")
+    p.add_argument("--compose-k", type=int, default=None,
+        help="Composed methods: problems per datapoint; selects the __k{K} prompt/dataset files.")
     p.add_argument(
         "--run-id",
         help="Identifier for model lookup (method_f: trained AC RL; otherwise: SFT) and new RL run names. "
