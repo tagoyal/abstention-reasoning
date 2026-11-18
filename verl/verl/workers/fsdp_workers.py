@@ -331,11 +331,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if role == "actor" and self.config.actor.get("success_loss_weight") is not None:
                 from verl.utils.prefix_success import attach_success_head, validate_success_config
 
+                success_only = self.config.actor.get("success_only", False)
                 validate_success_config(
                     self.config.actor.success_loss_weight,
                     self.config.actor.success_interval,
                     self.config.actor.success_update_backbone,
                 )
+                if success_only and (
+                    self.config.actor.success_update_backbone or self.config.actor.success_loss_weight <= 0
+                ):
+                    raise ValueError("Classifier-only training requires head-only BCE with a positive weight")
                 if self._is_lora or use_fused_kernels or use_liger:
                     raise ValueError(
                         "Prefix success requires full-parameter training without fused LM-head/Liger kernels"
@@ -344,6 +349,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     actor_module,
                     update_backbone=self.config.actor.success_update_backbone,
                     model_path=local_path,
+                    freeze_backbone=success_only,
                 )
         torch.distributed.barrier()
 
@@ -368,7 +374,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         auto_wrap_policy = get_fsdp_wrap_policy(
             module=actor_module,
             config=fsdp_config.get("wrap_policy", None),
-            is_lora=self.config.model.get("lora_rank", 0) > 0,
+            # Wrap the trainable leaf separately from frozen solver parameters.
+            is_lora=self.config.model.get("lora_rank", 0) > 0 or self.config.actor.get("success_only", False),
         )
 
         if self._is_rollout and self.config.rollout.name == "hf":
@@ -397,7 +404,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 mixed_precision=mixed_precision,
                 sync_module_states=True,
                 device_mesh=self.device_mesh,
-                use_orig_params=self.config.actor.fsdp_config.get("use_orig_params", False),
+                use_orig_params=(
+                    not self.config.actor.get("success_only", False)
+                    and self.config.actor.fsdp_config.get("use_orig_params", False)
+                ),
                 forward_prefetch=self.config.actor.fsdp_config.get("forward_prefetch", False),
             )
         elif fsdp_strategy == "fsdp2":
@@ -435,7 +445,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             from verl.utils.torch_functional import get_constant_schedule_with_warmup, get_cosine_schedule_with_warmup
 
             actor_optimizer = optim.AdamW(
-                actor_module_fsdp.parameters(),
+                (parameter for parameter in actor_module_fsdp.parameters() if parameter.requires_grad),
                 lr=optim_config.lr,
                 betas=optim_config.get("betas", (0.9, 0.999)),
                 weight_decay=optim_config.get("weight_decay", 1e-2),

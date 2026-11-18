@@ -513,6 +513,17 @@ def drop_exhausted_records(records: list[dict]) -> tuple[list[dict], int]:
     return keep, len(records) - len(keep)
 
 
+def _wrap_composed_task(task, method, task_name: str):
+    """Composed methods grade K subparts per datapoint; see pipeline/core/composed.py."""
+    if method is None or not method.composed:
+        return task
+    from pipeline.core.composed import ComposedTask, check_composed_task
+    check_composed_task(task_name)
+    if method.multi_turn:
+        raise ValueError("Composed methods do not support multi-turn hints yet")
+    return ComposedTask(task)
+
+
 def copy_source_fields(record: dict, prompt_data: dict) -> None:
     """Preserve fields needed to derive later datasets from this generation."""
     for key in (
@@ -521,6 +532,8 @@ def copy_source_fields(record: dict, prompt_data: dict) -> None:
         "hint_sequence",
         "ground_truth",
         "split",
+        "source_indices",
+        "source_variants",
     ):
         if key in prompt_data:
             record[key] = prompt_data[key]
@@ -564,6 +577,7 @@ def generate(
     max_oversample: int = 5,
     data_name: str | None = None,
     models_name: str | None = None,
+    compose_k: int | None = None,
 ) -> Path:
     """
     Generate model outputs on prompts.
@@ -618,6 +632,7 @@ def generate(
         max_oversample: Cap on phase-3 resampling rounds.
         data_name: Data directory name (default: task_name)
         models_name: Models directory name (default: data_name)
+        compose_k: Problems per datapoint for composed methods (selects the k{K} prompts/dataset)
         ... generation config ...
 
     Returns:
@@ -632,6 +647,10 @@ def generate(
     method = None
     if method_name is not None:
         method = Method.load(method_name, task_name)
+        method.set_compose_k(compose_k)
+    elif compose_k is not None:
+        raise ValueError("--compose-k requires a composed --method (e.g. baseline_composed)")
+    task = _wrap_composed_task(task, method, task_name)
 
     # Resolve multi_turn from method config (CLI overrides if explicitly set)
     if multi_turn is None:
@@ -1327,6 +1346,16 @@ def _compute_multisample_metrics(details: list[dict]) -> dict:
     if by_level:
         metrics["by_level"] = {l: _group_metrics(recs) for l, recs in sorted(by_level.items())}
 
+    # Composed datapoints: fraction of individual subparts correct across samples.
+    flags = [
+        ok
+        for d in details
+        for s in d.get("samples", [])
+        for ok in s.get("subpart_correct", [])
+    ]
+    if flags:
+        metrics["subpart_accuracy"] = sum(flags) / len(flags)
+
     return metrics
 
 
@@ -1362,6 +1391,9 @@ def _format_multisample_metrics(metrics: dict, model_name: str | None, num_sampl
         lines.append("  " + "-" * 51)
         lines.append(_row("Total", metrics))
 
+    if "subpart_accuracy" in metrics:
+        lines.append(f"  Subpart accuracy: {metrics['subpart_accuracy']:.1%}")
+
     return "\n".join(lines)
 
 
@@ -1384,7 +1416,8 @@ def resolve_eval_output_path(
     """
     samples_suffix = f"_{num_samples}s" if num_samples > 1 else ""
     hint_suffix = "_nohint" if no_hints else ""
-    suffix = f"{samples_suffix}{hint_suffix}"
+    compose_suffix = f"_k{method.compose_k}" if getattr(method, "composed", False) else ""
+    suffix = f"{compose_suffix}{samples_suffix}{hint_suffix}"
     if model_name in ("sft", "rl"):
         return method.eval_path(models_name, model_name, run_id, split, suffix)
     # A checkpoint evaluated outside any run of ours -- a stock HuggingFace
@@ -1417,6 +1450,7 @@ def evaluate(
     no_hints: bool = False,
     data_name: str | None = None,
     models_name: str | None = None,
+    compose_k: int | None = None,
 ) -> Path:
     """
     Evaluate a model on prompts and compute metrics.
@@ -1435,6 +1469,7 @@ def evaluate(
             the drop against a normal run measures what the hints were worth.
         data_name: Data directory name (default: task_name)
         models_name: Models directory name (default: data_name)
+        compose_k: Problems per datapoint for composed methods (selects the k{K} prompts)
         ... generation config ...
 
     Returns:
@@ -1449,6 +1484,10 @@ def evaluate(
     method = None
     if method_name is not None:
         method = Method.load(method_name, task_name)
+        method.set_compose_k(compose_k)
+    elif compose_k is not None:
+        raise ValueError("--compose-k requires a composed --method (e.g. baseline_composed)")
+    task = _wrap_composed_task(task, method, task_name)
 
     # Resolve multi_turn from method config (CLI overrides if explicitly set)
     if multi_turn is None:
@@ -1700,6 +1739,8 @@ def evaluate(
                     "predicted_answer": meta.get("predicted_answer") if isinstance(meta, dict) else None,
                     "finish_reason": s.get("finish_reason", "unknown"),
                     "token_count": s.get("token_count", 0),
+                    **({"subpart_correct": meta["subpart_correct"]}
+                       if isinstance(meta, dict) and "subpart_correct" in meta else {}),
                 })
 
             n_correct = sum(1 for s in samples if s["correct"])

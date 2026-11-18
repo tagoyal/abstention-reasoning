@@ -108,6 +108,21 @@ class Method:
     success_loss_weight: float | None = None
     success_interval: int = 10
     success_update_backbone: bool = True
+    success_only: bool = False
+    composed: bool = False  # K independent problems per datapoint (pipeline/core/composed.py)
+    compose_k: int | None = None  # Set per command via --compose-k; part of artifact names
+
+    def set_compose_k(self, compose_k: int | None) -> None:
+        """Apply --compose-k. Composed methods require it; others reject it."""
+        if not self.composed:
+            if compose_k is not None:
+                raise ValueError(f"--compose-k only applies to composed methods, not '{self.name}'")
+            return
+        if compose_k is None:
+            compose_k = self.compose_k
+        if compose_k is None or compose_k < 1:
+            raise ValueError(f"Method '{self.name}' requires --compose-k K (K >= 1)")
+        self.compose_k = compose_k
 
     # Backwards compatibility alias
     @property
@@ -170,6 +185,9 @@ class Method:
             success_loss_weight=data.get("success_loss_weight"),
             success_interval=data.get("success_interval", 10),
             success_update_backbone=data.get("success_update_backbone", True),
+            success_only=data.get("success_only", False),
+            composed=data.get("composed", False),
+            compose_k=data.get("compose_k"),
         )
 
     @staticmethod
@@ -215,6 +233,8 @@ class Method:
         (`extend-quad-a0.5`).
         """
         stem = f"{split}__{self.name}"
+        if self.composed and self.compose_k is not None:
+            stem = f"{stem}__k{self.compose_k}"
         return f"{stem}__{desc}" if desc else stem
 
     def formatted_dir(self, data_name: str) -> Path:

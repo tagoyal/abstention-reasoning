@@ -1154,7 +1154,7 @@ def train_rl(
     train_batch_size: int = 64,
     val_batch_size: int = 64,
     learning_rate: float = 1e-6,
-    total_steps: int = 400,
+    total_steps: int | None = None,
     kl_coef: float = 0.001,
     n_samples: int = 8,
     save_freq: int | None = None,
@@ -1176,7 +1176,7 @@ def train_rl(
     shuffle_seed: int | None = None,
     overwrite: bool = False,
     continue_run: bool = False,
-    save_best: bool = False,
+    save_best: bool | None = False,
     best_metric: str = "auto",
     max_ckpt_to_keep: int | None = None,
     data_name: str | None = None,
@@ -1203,11 +1203,11 @@ def train_rl(
         train_batch_size: Training batch size
         val_batch_size: Validation batch size
         learning_rate: Learning rate
-        total_steps: Total training steps
+        total_steps: Total training steps (method_f: 100; otherwise: 400)
         kl_coef: KL divergence coefficient
         n_samples: Number of samples per prompt
         save_freq: Checkpoint save frequency
-        test_freq: Validation/logging frequency (default: same as save_freq)
+        test_freq: Validation/logging frequency (method_f: 20; otherwise: same as save_freq)
         max_prompt_length: Maximum prompt length in tokens
         max_response_length: Maximum response length in tokens
         max_model_len: Maximum model context length (default: prompt + response length).
@@ -1259,10 +1259,21 @@ def train_rl(
     method = None
     if method_name is not None:
         method = Method.load(method_name, task_name)
+        if method.composed:
+            raise NotImplementedError(
+                f"train_rl does not support composed method '{method.name}' yet: "
+                "the verl reward function scores a single <answer> tag, not <answer_i> tags."
+            )
 
     # Validate mutual exclusion
     if base_model is not None and sft_model_path is not None:
         raise ValueError("Cannot specify both --base-model and --sft-model")
+
+    success_only = method.success_only if method else False
+    if total_steps is None:
+        total_steps = 100 if success_only else 400
+    if save_best is None:
+        save_best = not success_only
 
     # Frequencies. With --save-best the periodic save is off by default: the only
     # checkpoints worth keeping are the ones validation picked, and an explicit
@@ -1271,7 +1282,7 @@ def train_rl(
     if save_freq is None:
         save_freq = -1 if save_best else 25
     if test_freq is None:
-        test_freq = save_freq if save_freq > 0 else 25
+        test_freq = 20 if success_only else (save_freq if save_freq > 0 else 25)
     if save_hint_bests and not save_best:
         raise ValueError("--save-hint-bests requires --save-best")
     if save_best and test_freq <= 0:
@@ -1309,7 +1320,10 @@ def train_rl(
     elif sft_model_path is not None:
         actor_model = str(sft_model_path)
     elif method is not None and run_id:
-        actor_model = str(method.sft_model_path(models_name, run_id))
+        if success_only:
+            actor_model = str(Method.load("method_ac", task_name).rl_model_path(models_name, run_id))
+        else:
+            actor_model = str(method.sft_model_path(models_name, run_id))
     else:
         raise ValueError("Either --base-model or --sft-model is required (or use --method and --run-id)")
 
@@ -1396,6 +1410,8 @@ def train_rl(
     from verl.utils.prefix_success import validate_success_config
 
     validate_success_config(success_loss_weight, success_interval, success_update_backbone)
+    if success_only and (success_update_backbone or success_loss_weight is None or success_loss_weight <= 0):
+        raise ValueError("Method F requires head-only training and a positive success_loss_weight")
 
     # A prompts file that does not exist used to be handed straight to verl,
     # which then failed much later with an opaque error. Only explicitly-passed
@@ -1555,7 +1571,7 @@ def train_rl(
         f"data.val_batch_size={val_batch_size}",
         f"data.max_prompt_length={max_prompt_length}",
         f"data.max_response_length={max_response_length}",
-        f"data.hint_metrics_source={'prompt' if method_name in {'method_ac', 'method_e'} else 'rollout'}",
+        f"data.hint_metrics_source={'prompt' if method_name in {'method_ac', 'method_e', 'method_f'} else 'rollout'}",
         f"custom_reward_function.path={reward_function_path}",
         f"custom_reward_function.name={reward_function_name}",
         f"actor_rollout_ref.model.path={actor_model}",
@@ -1563,7 +1579,7 @@ def train_rl(
         "actor_rollout_ref.actor.use_dynamic_bsz=True",
         f"actor_rollout_ref.actor.optim.lr={learning_rate}",
         f"actor_rollout_ref.actor.ppo_mini_batch_size={train_batch_size}",
-        "actor_rollout_ref.actor.use_kl_loss=True",
+        f"actor_rollout_ref.actor.use_kl_loss={not success_only}",
         "actor_rollout_ref.actor.ppo_micro_batch_size=8",
         f"actor_rollout_ref.rollout.n={n_samples}",
         f"actor_rollout_ref.rollout.max_model_len={max_model_len}",
@@ -1650,6 +1666,8 @@ def train_rl(
             f"actor_rollout_ref.actor.success_interval={success_interval}",
             f"actor_rollout_ref.actor.success_update_backbone={success_update_backbone}",
         ])
+    if success_only:
+        cmd.append("actor_rollout_ref.actor.success_only=True")
     if extra_overrides:
         cmd.extend(extra_overrides)
 

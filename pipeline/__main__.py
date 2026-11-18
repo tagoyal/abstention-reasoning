@@ -124,6 +124,7 @@ def cmd_create_prompts(args):
         num_hints=args.num_hints,
         force_json=args.json,
         data_name=args.data_name,
+        compose_k=args.compose_k,
     )
 
 
@@ -247,6 +248,7 @@ def cmd_generate(args):
         drop_exhausted=getattr(args, "drop_exhausted", False),
         data_name=args.data_name,
         models_name=args.models_name,
+        compose_k=args.compose_k,
     )
 
     # A target correct rate turns generation into the phase-3 oversampling loop:
@@ -350,6 +352,7 @@ def cmd_evaluate(args):
         no_hints=args.no_hints,
         data_name=args.data_name,
         models_name=args.models_name,
+        compose_k=args.compose_k,
     )
 
 
@@ -575,10 +578,13 @@ def main():
     p.add_argument("--seed", type=int, default=42, help="Random seed for split assignment")
     p.add_argument("--no-assistant-prefix", action="store_true", help="Don't include assistant prefix")
     p.add_argument("--num-hints", type=int, default=None,
-        help="Maximum hint level. method_e creates every level on every split; "
+        help="Maximum hint level. method_e/method_f create every level on every split; "
              "method_ac/method_a sample up to two levels for SFT and create every "
              "level for RL/eval; other methods include the first N hints.")
     p.add_argument("--json", action="store_true", help="Force JSON output for all splits (instead of parquet for RL)")
+    p.add_argument("--compose-k", type=int, default=None,
+        help="Composed methods (baseline_composed): problems per datapoint. Selects the "
+             "{split}__{method}__k{K} artifacts.")
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.set_defaults(func=cmd_create_prompts)
 
@@ -753,6 +759,9 @@ def main():
     p.add_argument("--max-oversample", type=int, default=5,
         help="Cap on --target-correct-rate resampling rounds (default 5).")
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
+    p.add_argument("--compose-k", type=int, default=None,
+        help="Composed methods (baseline_composed): problems per datapoint. Selects the "
+             "{split}__{method}__k{K} artifacts.")
     p.add_argument("--models-name", help="Models directory name under models/ (default: data-name)")
     p.set_defaults(func=cmd_generate)
 
@@ -812,6 +821,9 @@ def main():
     p.add_argument("--seed", type=int, default=42, help="Random seed for generation (default: 42)")
     p.add_argument("--no-hints", action="store_true", help="Counterfactual eval: block hint requests during decoding so the model must answer alone")
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
+    p.add_argument("--compose-k", type=int, default=None,
+        help="Composed methods (baseline_composed): problems per datapoint. Selects the "
+             "{split}__{method}__k{K} artifacts.")
     p.add_argument("--models-name", help="Models directory name under models/ (default: data-name)")
     p.set_defaults(func=cmd_evaluate)
 
@@ -921,7 +933,8 @@ def main():
     p.add_argument("--method", help="Method name for auto-derived paths, template, and reward config")
     p.add_argument(
         "--run-id",
-        help="Identifier for SFT lookup and new RL run names. Required with --method. "
+        help="Identifier for model lookup (method_f: trained AC RL; otherwise: SFT) and new RL run names. "
+        "Required with --method. "
         "For --continue-run, use the actual existing RL folder name.",
     )
     p.add_argument("--base-model", help="Base model for cold-start RL (mutually exclusive with --sft-model)")
@@ -937,18 +950,19 @@ def main():
     p.add_argument("--train-batch-size", type=int, default=64, help="Training batch size")
     p.add_argument("--val-batch-size", type=int, default=64, help="Validation batch size")
     p.add_argument("--learning-rate", type=float, default=1e-6, help="Learning rate")
-    p.add_argument("--total-steps", type=int, default=400, help="Total training steps")
+    p.add_argument("--total-steps", type=int, default=None, help="Total training steps (method_f: 100; otherwise: 400)")
     p.add_argument("--kl-coef", type=float, default=0.001, help="KL divergence coefficient")
     p.add_argument("--n-samples", type=int, default=8, help="Number of samples per prompt (group size)")
     p.add_argument("--success-loss-weight", type=float, default=None,
-                   help="Prefix-success BCE weight (method_e: 0.1; other methods: disabled). Zero ablates BCE.")
+                   help="Prefix-success BCE weight (method_e: 0.1; method_f: 1; otherwise disabled).")
     p.add_argument("--success-interval", type=int, default=None,
-                   help="Predict terminal correctness every L response tokens (default: 10)")
+                   help="Predict terminal correctness every L response tokens (method_f: 50; otherwise: 10)")
     p.add_argument("--success-update-backbone", action=argparse.BooleanOptionalAction, default=None,
-                   help="Let BCE update the backbone as well as the success head (default: true). "
+                   help="Let BCE update the backbone as well as the success head (method_f requires false). "
                         "--no-success-update-backbone trains only the head from BCE; RL is unchanged.")
     p.add_argument("--save-freq", type=int, default=None, help="Checkpoint save frequency (default: 25, or off when --save-best is set)")
-    p.add_argument("--test-freq", type=int, default=None, help="Validation/logging frequency (default: same as save-freq)")
+    p.add_argument("--test-freq", type=int, default=None,
+                   help="Validation/logging frequency (method_f: 20; otherwise same as save-freq)")
     p.add_argument("--max-prompt-length", type=int, default=2048, help="Maximum prompt length in tokens")
     p.add_argument("--max-response-length", type=int, default=2048, help="Maximum response length in tokens")
     p.add_argument("--max-model-len", type=int, default=8192, help="Maximum model context length (default: 8192). Set higher for multi-turn.")
@@ -965,7 +979,9 @@ def main():
     p.add_argument("--resume", help="Path to resume from existing run")
     p.add_argument("--overwrite", action="store_true", help="Discard an existing run at this run-id and train from scratch")
     p.add_argument("--continue-run", action="store_true", help="Resume the existing run at this run-id from its latest checkpoint")
-    p.add_argument("--save-best", action=argparse.BooleanOptionalAction, default=True, help="Also emit best/, the checkpoint with the highest validation score (last/ is always written). Use --no-save-best to disable (default: enabled)")
+    p.add_argument("--save-best", action=argparse.BooleanOptionalAction, default=None,
+                   help="Also emit best/, the checkpoint with the highest validation score (last/ is always written). "
+                        "Default: disabled for method_f's frozen solver; enabled otherwise.")
     p.add_argument("--best-metric", default="auto", help="Validation metric selecting the best checkpoint (default: auto, verl's headline val-core scalar)")
     p.add_argument(
         "--save-hint-bests",

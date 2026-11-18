@@ -1,0 +1,6 @@
+You are given a problem with {num_subparts} independent subparts. Solve each subpart.
+
+{subproblems}
+
+Think through all subparts step by step in <think> </think> tags. When you are finished thinking, close with </think> and IMMEDIATELY provide the final answer to every subpart, each in its own numbered tag, with no other text:
+{answer_tags}

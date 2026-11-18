@@ -169,7 +169,7 @@ def validate_success_config(weight, interval, update_backbone):
         raise ValueError("success_update_backbone must be a boolean")
 
 
-def attach_success_head(model, update_backbone=True, model_path=None):
+def attach_success_head(model, update_backbone=True, model_path=None, freeze_backbone=False):
     """Expose ``output.success_logits`` without retaining every layer's states.
 
     The LM-head input is the final hidden state, after the decoder's final norm.
@@ -179,6 +179,10 @@ def attach_success_head(model, update_backbone=True, model_path=None):
     """
     if hasattr(model, "success_head"):
         raise ValueError("Model already has a success head")
+    if freeze_backbone:
+        if update_backbone:
+            raise ValueError("A frozen backbone requires success_update_backbone=False")
+        model.requires_grad_(False)
     output_layer = model.get_output_embeddings()
     if not isinstance(output_layer, nn.Linear):
         raise ValueError("Prefix success currently requires a linear LM output head")

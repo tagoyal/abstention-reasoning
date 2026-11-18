@@ -58,6 +58,13 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
         self.success_loss_weight = self.config.get("success_loss_weight")
+        self.success_only = self.config.get("success_only", False)
+        if self.success_only and (
+            self.success_loss_weight is None
+            or self.success_loss_weight <= 0
+            or self.config.success_update_backbone
+        ):
+            raise ValueError("Classifier-only training requires head-only BCE with a positive weight")
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
         if torch.distributed.get_rank() == 0:
@@ -422,8 +429,8 @@ class DataParallelPPOActor(BasePPOActor):
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
-        # make sure we are in training mode
-        self.actor_module.train()
+        # A frozen solver stays deterministic while its linear readout learns.
+        self.actor_module.train(not self.success_only)
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
 
@@ -433,10 +440,10 @@ class DataParallelPPOActor(BasePPOActor):
             "input_ids",
             "attention_mask",
             "position_ids",
-            "old_log_probs",
-            "advantages",
         ]
-        if self.config.use_kl_loss:
+        if not self.success_only:
+            select_keys.extend(["old_log_probs", "advantages"])
+        if self.config.use_kl_loss and not self.success_only:
             select_keys.append("ref_log_prob")
         if self.success_loss_weight is not None:
             select_keys.append("success_labels")
@@ -514,8 +521,6 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         data = data.to(get_device_id())  # actor device is cpu when using offload
                     response_mask = data["response_mask"]
-                    old_log_prob = data["old_log_probs"]
-                    advantages = data["advantages"]
 
                     clip_ratio = self.config.clip_ratio
                     clip_ratio_low = (
@@ -530,7 +535,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                     # all return: (bsz, response_length)
                     calculate_entropy = False
-                    if entropy_coeff != 0:
+                    if entropy_coeff != 0 and not self.success_only:
                         calculate_entropy = True
                     if self.success_loss_weight is not None:
                         entropy, log_prob, success_logits = self._forward_micro_batch(
@@ -542,52 +547,69 @@ class DataParallelPPOActor(BasePPOActor):
                             micro_batch=data, temperature=temperature, calculate_entropy=calculate_entropy
                         )
 
-                    loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+                    if not self.success_only:
+                        old_log_prob = data["old_log_probs"]
+                        advantages = data["advantages"]
+                        loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
 
-                    if self.config.policy_loss.loss_mode == "vanilla":
-                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
-                            old_log_prob=old_log_prob,
-                            log_prob=log_prob,
-                            advantages=advantages,
-                            response_mask=response_mask,
-                            cliprange=clip_ratio,
-                            cliprange_low=clip_ratio_low,
-                            cliprange_high=clip_ratio_high,
-                            clip_ratio_c=clip_ratio_c,
-                            loss_agg_mode=loss_agg_mode,
+                        if self.config.policy_loss.loss_mode == "vanilla":
+                            pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = compute_policy_loss(
+                                old_log_prob=old_log_prob,
+                                log_prob=log_prob,
+                                advantages=advantages,
+                                response_mask=response_mask,
+                                cliprange=clip_ratio,
+                                cliprange_low=clip_ratio_low,
+                                cliprange_high=clip_ratio_high,
+                                clip_ratio_c=clip_ratio_c,
+                                loss_agg_mode=loss_agg_mode,
+                            )
+                        else:
+                            policy_loss_fn = get_policy_loss_fn(loss_mode)
+                            pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                                old_log_prob, log_prob, advantages, response_mask, loss_agg_mode, self.config
+                            )
+
+                        if entropy_coeff != 0:
+                            entropy_loss = agg_loss(
+                                loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode
+                            )
+
+                            # compute policy loss
+                            policy_loss = pg_loss - entropy_loss * entropy_coeff
+                        else:
+                            policy_loss = pg_loss
+
+                        if self.config.use_kl_loss:
+                            ref_log_prob = data["ref_log_prob"]
+                            # compute kl loss
+                            kld = kl_penalty(
+                                logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
+                            )
+                            kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+                            policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
+                            micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item()
+                            micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                        micro_batch_metrics.update(
+                            {
+                                "actor/pg_loss": pg_loss.detach().item(),
+                                "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+                                "actor/ppo_kl": ppo_kl.detach().item(),
+                                "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+                            }
                         )
-                    else:
-                        policy_loss_fn = get_policy_loss_fn(loss_mode)
-                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
-                            old_log_prob, log_prob, advantages, response_mask, loss_agg_mode, self.config
-                        )
-
-                    if entropy_coeff != 0:
-                        entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-
-                        # compute policy loss
-                        policy_loss = pg_loss - entropy_loss * entropy_coeff
-                    else:
-                        policy_loss = pg_loss
-
-                    if self.config.use_kl_loss:
-                        ref_log_prob = data["ref_log_prob"]
-                        # compute kl loss
-                        kld = kl_penalty(
-                            logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
-                        )
-                        kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-
-                        policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
-                        micro_batch_metrics["actor/kl_loss"] = kl_loss.detach().item()
-                        micro_batch_metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
                     if self.success_loss_weight is not None:
                         success_loss, success_metrics = prefix_success_loss(
                             success_logits, response_mask, data["success_labels"],
                             self.config.success_interval,
                         )
-                        policy_loss = policy_loss + self.success_loss_weight * success_loss
+                        if self.success_only:
+                            policy_loss = self.success_loss_weight * success_loss
+                        else:
+                            policy_loss = policy_loss + self.success_loss_weight * success_loss
                         micro_batch_metrics.update(success_metrics)
                         micro_batch_metrics["actor/success_loss_weight"] = self.success_loss_weight
                         micro_batch_metrics["actor/success_update_backbone"] = float(
@@ -601,14 +623,6 @@ class DataParallelPPOActor(BasePPOActor):
                         loss = policy_loss / self.gradient_accumulation
                     loss.backward()
 
-                    micro_batch_metrics.update(
-                        {
-                            "actor/pg_loss": pg_loss.detach().item(),
-                            "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-                            "actor/ppo_kl": ppo_kl.detach().item(),
-                            "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-                        }
-                    )
                     append_to_dict(metrics, micro_batch_metrics)
 
                 grad_norm = self._optimizer_step()

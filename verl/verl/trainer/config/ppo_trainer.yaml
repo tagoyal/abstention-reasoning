@@ -168,6 +168,9 @@ actor_rollout_ref:
     # False detaches hidden states for BCE; RL still updates the backbone.
     success_update_backbone: true
 
+    # Classifier-only training freezes the LM and excludes policy, KL, and entropy losses.
+    success_only: false
+
     # fsdp, fsdp2 or megatron. fsdp backend used here.
     strategy: fsdp
 

@@ -153,6 +153,7 @@ def create_prompts(
     num_hints: int | None = None,
     force_json: bool = False,
     data_name: str | None = None,
+    compose_k: int | None = None,
 ) -> Path | dict[str, Path]:
     """
     Create prompts from primitives for a given split (or all splits).
@@ -171,6 +172,7 @@ def create_prompts(
         include_assistant_prefix: Whether to include assistant's opening
         num_hints: Number of hints to extract from prefix_hints (0-6). If None, no hint injection.
         data_name: Data directory name (default: task_name)
+        compose_k: Problems per datapoint for composed methods (e.g. baseline_composed)
 
     Returns:
         Path to created prompts file, or dict of paths if split="all"
@@ -182,6 +184,15 @@ def create_prompts(
     method = None
     if method_name is not None:
         method = Method.load(method_name, task_name)
+        method.set_compose_k(compose_k)
+    elif compose_k is not None:
+        raise ValueError("--compose-k requires a composed --method (e.g. baseline_composed)")
+
+    if method is not None and method.composed:
+        from pipeline.core.composed import check_composed_task
+        check_composed_task(task_name)
+        if num_hints is not None:
+            raise ValueError(f"{method.name} does not support --num-hints")
 
     # Default primitives path
     if primitives_path is None:
@@ -315,6 +326,18 @@ def _create_prompts_single(
 ) -> Path:
     """Apply a method's template to one materialized partition."""
     data_name = resolve_data_name(task_name, data_name)
+    if method is not None and method.composed:
+        return _create_composed_prompts_single(
+            task=task,
+            task_name=task_name,
+            data_name=data_name,
+            output_path=output_path,
+            split_name=split_name,
+            seed=seed,
+            include_assistant_prefix=include_assistant_prefix,
+            assistant_prefix=assistant_prefix,
+            method=method,
+        )
     # Read the partition rather than recomputing it. create_partitions wrote it
     # down precisely so that every method formats the *same* problems, and so
     # that editing a SPLITS boundary later cannot silently repartition work
@@ -330,7 +353,7 @@ def _create_prompts_single(
     # Determine format from output path
     fmt = "parquet" if str(output_path).endswith(".parquet") else "json"
     uses_fixed_hint_levels = (
-        method is not None and method.name in {"method_ac", "method_a", "method_e"}
+        method is not None and method.name in {"method_ac", "method_a", "method_e", "method_f"}
     )
     if uses_fixed_hint_levels and num_hints is None:
         raise ValueError(f"{method.name} requires --num-hints")
@@ -341,9 +364,9 @@ def _create_prompts_single(
 
     is_parquet = fmt == "parquet"
 
-    # Method E covers every hint level on every split; A/AC sample SFT levels.
+    # E/F cover every hint level on every split; A/AC sample SFT levels.
     uses_all_hint_levels = (
-        (method is not None and method.name == "method_e")
+        (method is not None and method.name in {"method_e", "method_f"})
         or split_name == "eval"
         or "rl_" in split_name
     )
@@ -500,6 +523,95 @@ def _create_prompts_single(
         save_json(output_path, records)
 
     print(f"Saved {len(records)} records to {output_path}")
+    return output_path
+
+
+def _create_composed_prompts_single(
+    task,
+    task_name: str,
+    data_name: str,
+    output_path: Path,
+    split_name: str,
+    seed: int,
+    include_assistant_prefix: bool,
+    assistant_prefix: str | None,
+    method: "Method",
+) -> Path:
+    """Compose K problems from one partition into each datapoint.
+
+    The partition is only read. Problems are shuffled with `seed` and chunked
+    into disjoint groups of K (sampling without replacement); the remainder of
+    N mod K problems is dropped. ground_truth holds each subpart's own base
+    ground truth, so grading reuses the base task's checker per subpart.
+    """
+    from pipeline.core.composed import (
+        build_composed_fields,
+        group_disjoint,
+        load_subproblem_template,
+        render_fields,
+    )
+
+    partition = partition_path(data_name, split_name)
+    if not partition.exists():
+        raise FileNotFoundError(
+            f"No {split_name} partition at {partition}. "
+            f"Run 'python -m pipeline create_partitions --task {task_name}' first."
+        )
+    problems = load_json(partition)
+    k = method.compose_k
+    groups = group_disjoint(problems, k, seed)
+    if not groups:
+        raise ValueError(f"{split_name} has {len(problems)} problems, fewer than K={k}")
+
+    is_parquet = str(output_path).endswith(".parquet")
+    subproblem_template = load_subproblem_template(task_name, method.template_variant)
+    template = method.load_template(task_name, split_name.split("_")[0])
+    variant = f"composed_k{k}"
+    system_message = getattr(task, "system_message", None)
+
+    records = []
+    for group_index, group in enumerate(groups):
+        fields = build_composed_fields(group, subproblem_template)
+        ground_truth = {
+            "num_subparts": k,
+            "source_indices": [p["index"] for p in group],
+            "subproblems": [task.get_ground_truth(p) for p in group],
+        }
+        record = {
+            "index": group_index,
+            "ground_truth": ground_truth,
+            "variant": variant,
+            "split": split_name,
+            "source_indices": ground_truth["source_indices"],
+            "source_variants": [p.get("variant", "unknown") for p in group],
+        }
+        if is_parquet:
+            # verl renders `primitive` into rl.txt at train time.
+            record.update({
+                "primitive": fields,
+                "data_source": task_name,
+                "assistant_prefix": assistant_prefix,
+                "extra_info": {"index": group_index},
+                "reward_model": {"style": "rule", "ground_truth": ground_truth},
+            })
+        else:
+            messages = []
+            if system_message:
+                messages.append({"role": "system", "content": system_message})
+            messages.append({"role": "user", "content": render_fields(template, fields)})
+            if include_assistant_prefix and assistant_prefix:
+                messages.append({"role": "assistant", "content": assistant_prefix})
+            record["prompt"] = messages
+        records.append(record)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if is_parquet:
+        save_parquet(output_path, records)
+    else:
+        save_json(output_path, records)
+    dropped = len(problems) - len(groups) * k
+    print(f"Saved {len(records)} composed records (K={k}, {len(problems)} problems, "
+          f"{dropped} left over) to {output_path}")
     return output_path
 
 

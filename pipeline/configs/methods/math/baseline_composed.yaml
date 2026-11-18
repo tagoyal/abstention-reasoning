@@ -1,0 +1,7 @@
+# K independent problems per datapoint, answered in <answer_i> tags.
+# K is passed per command with --compose-k and appears in artifact names
+# (e.g. eval__baseline_composed__k3.json). RL reward is not implemented yet.
+template_variant: baseline_composed
+composed: true
+reward_function: compute_score
+reward_kwargs: {}
