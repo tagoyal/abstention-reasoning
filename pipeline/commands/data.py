@@ -626,9 +626,8 @@ def _create_verification_data_method_c(
 ) -> Path:
     """Build verifier prompts for method_c from single representative solves.
 
-    Unlike method_a, there is no aggregation across samples: each training
-    example is one representative solve attempt, and the ground truth is
-    simply whether that attempt was correct (1) or not (0). The input can be
+    Each training example is one representative solve attempt, and the ground
+    truth is simply whether that attempt was correct (1) or not (0). The input can be
     either shape `generations_path` points at:
       - an `evaluate --num-samples N` results file (e.g. from
         `create_verification_data --run-solver`): one representative sample
@@ -751,20 +750,16 @@ def _create_verification_data_method_a(
     output_path: Path | None,
     method_name: str,
     num_samples: int,
-    threshold: float,
 ) -> Path:
-    """Build predictor SFT data from a multi-sample solver aggregate.
+    """Build one predictor SFT example per solver rollout.
 
-    Each record's label is a pass-rate threshold: 1 if the solver answered
-    correctly in at least `threshold` of its `num_samples` rollouts, else 0.
+    Rollouts from the same problem/hint prompt share the predictor input,
+    but each target is that rollout's own correctness (1 or 0).
     """
     if output_path is None:
         raise ValueError("--output is required for method_name != 'method_c'")
     if num_samples < 1:
         raise ValueError(f"num_samples must be positive, got {num_samples}")
-    if not 0 <= threshold <= 1:
-        raise ValueError(f"threshold must be between 0 and 1, got {threshold}")
-
     task = get_task(task_name)
     method = Method.load(method_name, task_name)
     template = method.load_template(task_name, "sft")
@@ -772,9 +767,6 @@ def _create_verification_data_method_a(
     # `evaluate --num-samples N` (the --run-solver path) writes a results dict
     # with a "details" list, one entry per problem, each carrying every raw
     # sample and its own correctness under "samples"/"n_samples"/"n_correct".
-    # A flat list is the older `generate`-produced aggregate (one best sample
-    # per problem, no raw per-sample record) -- still accepted for anyone
-    # pointing --generations at a file built that way.
     if isinstance(generations, dict) and "details" in generations:
         generations = generations["details"]
 
@@ -784,19 +776,35 @@ def _create_verification_data_method_a(
         index = source.get("index")
         actual_samples = source.get("num_samples", source.get("n_samples"))
         correct_samples = source.get("num_correct_samples", source.get("n_correct"))
-        raw_samples = source.get("samples")  # per-sample generation + correctness, when available
+        raw_samples = source.get("samples")
 
         if actual_samples != num_samples:
             raise ValueError(
                 f"Index {index}: expected num_samples={num_samples}, "
                 f"got {actual_samples!r}"
             )
+        if not isinstance(raw_samples, list) or len(raw_samples) != num_samples:
+            raise ValueError(
+                f"Index {index}: expected {num_samples} individual samples with "
+                "correctness flags; regenerate with evaluate --num-samples "
+                f"{num_samples} (or --run-solver)"
+            )
+        for sample_index, sample in enumerate(raw_samples):
+            if not isinstance(sample, dict) or not isinstance(sample.get("correct"), bool):
+                raise TypeError(
+                    f"Index {index}, sample {sample_index}: missing/invalid 'correct' flag"
+                )
         if (
             not isinstance(correct_samples, int)
             or not 0 <= correct_samples <= actual_samples
         ):
             raise ValueError(
                 f"Index {index}: invalid num_correct_samples={correct_samples!r}"
+            )
+        if sum(sample["correct"] for sample in raw_samples) != correct_samples:
+            raise ValueError(
+                f"Index {index}: num_correct_samples={correct_samples} does not match "
+                "individual sample correctness"
             )
 
         pass_rate = correct_samples / actual_samples
@@ -823,31 +831,28 @@ def _create_verification_data_method_a(
             rendered_template,
             include_assistant_prefix=False,
         )
-        label = int(pass_rate >= threshold)
-        positives += label
-        record = {
-            "index": index,
-            "source_index": source.get("source_index", index),
-            "hint_level": source.get("hint_level"),
-            "hint_sequence": hint_sequence,
-            "prompt": prompt,
-            "generation": f"<answer>{label}</answer>",
-            "label": label,
-            # This completion is the gold classification label, so both classes
-            # are valid SFT examples and pass the existing task-level filter.
-            "correct": True,
-            "pass_rate": pass_rate,
-            "num_correct_samples": correct_samples,
-            "num_samples": actual_samples,
-            "variant": source.get("variant", "unknown"),
-            "split": source.get("split"),
-        }
-        if raw_samples is not None:
-            # Keeps the label auditable against the rollouts it was computed
-            # from: each entry is one of the solver's N samples with its own
-            # generation text and correctness flag.
-            record["solver_samples"] = raw_samples
-        records.append(record)
+        for sample_index, sample in enumerate(raw_samples):
+            label = int(sample["correct"])
+            positives += label
+            records.append({
+                "index": len(records),
+                "prompt_index": index,
+                "source_index": source.get("source_index", index),
+                "sample_index": sample_index,
+                "hint_level": source.get("hint_level"),
+                "hint_sequence": hint_sequence,
+                "prompt": prompt,
+                "generation": f"<answer>{label}</answer>",
+                "label": label,
+                # Both classes are gold SFT targets, even when the solver failed.
+                "correct": True,
+                "solver_sample": sample,
+                "pass_rate": pass_rate,
+                "num_correct_samples": correct_samples,
+                "num_samples": actual_samples,
+                "variant": source.get("variant", "unknown"),
+                "split": source.get("split"),
+            })
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_json(output_path, records)
@@ -864,7 +869,6 @@ def create_verification_data(
     output_path: Path | None = None,
     method_name: str = "method_a",
     num_samples: int = 10,
-    threshold: float = 0.5,
     sft_fraction: float = 0.1,
     seed: int = 42,
     run_id: str | None = None,
@@ -886,7 +890,10 @@ def create_verification_data(
     solver_use_async: bool = False,
     solver_seed: int = 42,
 ) -> Path:
-    """Convert multi-sample solver aggregates into binary predictor SFT data.
+    """Convert solver rollouts into binary predictor data.
+
+    Method A retains every rollout as a separate SFT example, labeled by
+    its correctness, not a threshold on the prompt's aggregate pass rate.
 
     When `run_solver` is set, the multi-sample solver aggregate isn't read
     from disk -- it's produced first by evaluating `num_samples` rollouts per
@@ -896,9 +903,8 @@ def create_verification_data(
     feeds straight into the label-building logic below. `evaluate` (unlike
     `generate`) keeps every one of the N raw samples and its individual
     correctness rather than collapsing to one representative sample, which is
-    exactly the per-sample signal the predictor's pass-rate label is built
-    from -- and those raw samples are carried into the output records here too,
-    so the label stays auditable against the rollouts that produced it.
+    exactly the per-sample signal Method A's labels are built from. Each
+    output record retains its solver sample so the label stays auditable.
     """
     if run_solver:
         if generations_path is not None:
@@ -972,7 +978,6 @@ def create_verification_data(
             output_path=output_path,
             method_name=method_name,
             num_samples=num_samples,
-            threshold=threshold,
         )
     else:
         raise ValueError(f"Unsupported method_name: {method_name!r}")
@@ -1051,10 +1056,9 @@ def generate_tree(
     Root step (i == 0): runs the solver (`evaluate`) on the prompts already
     created for this method/split -- no hints or other method-specific
     machinery here, just `num_samples` independent rollouts per existing
-    prompt. Each prompt's label is a pass-rate threshold exactly like
-    `create_verification_data`'s method_a (1 if pass_rate >= threshold, else
-    0), but the recorded "generation" is the bare label ("0"/"1"), not
-    method_a's `<answer>{label}</answer>` completion -- there is no predictor
+    prompt. Each prompt's label is a pass-rate threshold (1 if pass_rate >=
+    threshold, else 0), and the recorded "generation" is the bare label
+    ("0"/"1"), not method_a's `<answer>{label}</answer>` completion -- there is no predictor
     template involved here, just the raw rollouts and their aggregate label.
     One of the root's `num_samples` rollouts is also picked uniformly at
     random (not conditioned on correctness) as this datapoint's single

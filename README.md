@@ -142,6 +142,48 @@ Run `python -m pipeline list_methods --task <task>` to list what a task actually
 
 Reward functions themselves live with the trainer, in `verl/recipe/{task}/reward_function.py`; a method config selects one by name and passes it `reward_kwargs`.
 
+### Method A: per-rollout predictor SFT
+
+`create_verification_data --method method_a` retains every solver rollout as a
+separate SFT example. Ten rollouts yield ten copies of the problem-and-hints
+prompt, each targeting `<answer>1</answer>` if its rollout was correct or
+`<answer>0</answer>` otherwise; there is no pass-rate threshold. Each record
+retains its individual `solver_sample`. Inputs must include `samples` and their
+boolean `correct` flags (`evaluate --num-samples 10` or `--run-solver`), not
+older aggregates that kept only one representative rollout.
+
+Method AC's default RL training/validation partitions are `rl_gen_train` and
+`rl_gen_val`. For a new Method A predictor, use `--run-solver --solver-method
+method_ac --solver-run-id <ac-run-id> --solver-split rl_ver_train` (and
+`rl_ver_val` for validation), with the matching `--task` and `--data-name`.
+Pass an explicit `--output` for each SFT dataset, then use `train_sft --method
+method_a --completion-only-loss` with the AC checkpoint as `--base-model` and
+explicit `--dataset` / `--eval-dataset` paths. Check the actual solver run's
+training configuration if its partitions were overridden.
+
+`launch_scripts/run_train_a.sh` generates both verifier splits (ten solver
+rollouts per prompt), then runs completion-only SFT from the trained AC model.
+It writes datasets to `data/<data-name>/sft_datasets/sft_{train,val}__method_a__<ac-run-id>.json`
+and the predictor to `models/<data-name>/method_a_sft/<ac-run-id>/model`.
+Existing solver evaluations are reused.
+
+To submit through the Bonete training launcher, select the task, data name,
+and models in `launch_train_jobs.sh`, and set `RUN_TRAIN_SCRIPT="run_train_a.sh"`
+there. The launcher passes the selected runner to `submit_train_template.yaml`;
+no template edit is needed to switch methods.
+For dated AC runs, add this container environment entry to the template,
+adjusting the prefix to match the desired solver:
+
+```yaml
+env:
+- name: AC_RUN_ID
+  value: "11_10-method_ac-__MODEL__"
+```
+
+The existing launcher substitutes `__MODEL__`. Push the scripts/configuration
+first (pod initialization clones the repository), then run
+`bash launch_scripts/launch_train_jobs.sh`.
+
 ## Commands
 
 **Discovery**

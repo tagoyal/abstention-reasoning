@@ -136,7 +136,6 @@ def cmd_create_verification_data(args):
         output_path=Path(args.output) if args.output else None,
         method_name=args.method,
         num_samples=args.num_samples,
-        threshold=args.threshold,
         sft_fraction=args.sft_fraction,  # only relevant for method_c
         seed=args.seed,  # only relevant for method_c
         run_id=args.run_id,  # only relevant for method_c
@@ -593,7 +592,7 @@ def main():
     # create_verification_data
     p = subparsers.add_parser(
         "create_verification_data",
-        help="Create binary predictor data from multi-sample solver aggregates",
+        help="Create predictor data (method_a: one labeled example per solver rollout)",
     )
     p.add_argument("--task", required=True, help="Task name")
     p.add_argument("--method", default="method_a",
@@ -606,8 +605,6 @@ def main():
                         "method_a; auto-derived under problems_with_format/ for method_c")
     p.add_argument("--num-samples", type=int, default=10,
                    help="Required samples per source prompt (default: 10)")
-    p.add_argument("--threshold", type=float, default=0.5,
-                   help="Label 1 when pass_rate >= threshold (default: 0.5)")
     p.add_argument("--sft-fraction", type=float, default=0.1,
                    help="method_c only: fraction of records held out as SFT prompts, "
                         "rest go to RL (default: 0.1)")

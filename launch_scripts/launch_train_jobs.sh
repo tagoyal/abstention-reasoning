@@ -1,11 +1,10 @@
 #!/bin/bash
 # Submits one k8s job per (TASK, MODEL) combo, each running
-# `run_train.sh <task> <model> <hf_model>` inside the pod (train_sft then
-# train_rl, baseline method, math_o1 data). Generates the pod manifest
+# the runner selected by RUN_TRAIN_SCRIPT inside the pod. Generates the pod manifest
 # in-memory (via sed substitution on submit_train_template.yaml, which uses
 # __TASK__/__MODEL__/__HF_MODEL__ placeholders) and pipes it directly to
 # `kubectl create -f -` -- no per-combo yaml/sh files are written to disk or
-# need to be committed. Only run_train.sh (referenced inside the pod, which
+# need to be committed. The selected runner (referenced inside the pod, which
 # git-clones the repo) must be pushed beforehand.
 #
 # Usage: bash launch_train_jobs.sh
@@ -24,10 +23,11 @@ set -euo pipefail
 #   done
 # done
 
-TASKS=(countdown)
-DATA_NAME=countdown
+TASKS=(math)
+DATA_NAME=math_o3
+RUN_TRAIN_SCRIPT="run_train_a.sh"
 SUCCESS_UPDATE_BACKBONE=true
-MODELS=(qwen2.5-1.5b) #qwen2.5-3b qwen3-4b) # 
+MODELS=(qwen2.5-3b qwen3-4b) #) # 
 ALPHA=2
 BASE=0.1
 
@@ -61,7 +61,7 @@ for TASK in "${TASKS[@]}"; do
   for MODEL in "${MODELS[@]}"; do
     HF_MODEL="${MODEL_MAP[$MODEL]}"
     GPUS="${GPU_MAP[$MODEL]}"
-    sed "s|__TASK__|${TASK}|; s|__MODEL__|${MODEL}|; s|__HF_MODEL__|${HF_MODEL}|; s|__GPUS__|${GPUS}|; s|__DATA_NAME__|${DATA_NAME}|; s|__SUCCESS_UPDATE_BACKBONE__|${SUCCESS_UPDATE_BACKBONE}|" launch_scripts/submit_train_template.yaml \
+    sed "s|__TASK__|${TASK}|; s|__MODEL__|${MODEL}|; s|__HF_MODEL__|${HF_MODEL}|; s|__GPUS__|${GPUS}|; s|__DATA_NAME__|${DATA_NAME}|; s|__SUCCESS_UPDATE_BACKBONE__|${SUCCESS_UPDATE_BACKBONE}|; s|__RUN_TRAIN_SCRIPT__|${RUN_TRAIN_SCRIPT}|" launch_scripts/submit_train_template.yaml \
       | kubectl create -f -
   done
 done
