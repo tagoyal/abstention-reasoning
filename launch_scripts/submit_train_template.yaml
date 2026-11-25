@@ -49,7 +49,11 @@ spec:
           command:
           - /bin/bash
           - -lc
-          - source /data/tanyagoyal/models/initialization_script.sh && bash launch_scripts/__RUN_TRAIN_SCRIPT__ __TASK__ __MODEL__ __HF_MODEL__ __DATA_NAME__ __SUCCESS_UPDATE_BACKBONE__
+          - source /data/tanyagoyal/models/initialization_script.sh && bash launch_scripts/__RUN_TRAIN_SCRIPT__ __TASK__ __MODEL__ __HF_MODEL__ __DATA_NAME__ __RUN_TRAIN_ARG__
+
+          env:
+          - name: SFT_DATA_DESC
+            value: "__SFT_DATA_DESC__"
 
           volumeMounts:
           - name: data

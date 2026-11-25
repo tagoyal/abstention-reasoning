@@ -23,9 +23,11 @@ set -euo pipefail
 #   done
 # done
 
-TASKS=(math)
-DATA_NAME=math_o3
-RUN_TRAIN_SCRIPT="run_train_a.sh"
+TASKS=(countdown)
+DATA_NAME=countdown
+RUN_TRAIN_SCRIPT="run_train_composer.sh"
+COMPOSE_K=2
+SFT_DATA_DESC=stitched
 SUCCESS_UPDATE_BACKBONE=true
 MODELS=(qwen2.5-3b qwen3-4b) #) # 
 ALPHA=2
@@ -61,7 +63,11 @@ for TASK in "${TASKS[@]}"; do
   for MODEL in "${MODELS[@]}"; do
     HF_MODEL="${MODEL_MAP[$MODEL]}"
     GPUS="${GPU_MAP[$MODEL]}"
-    sed "s|__TASK__|${TASK}|; s|__MODEL__|${MODEL}|; s|__HF_MODEL__|${HF_MODEL}|; s|__GPUS__|${GPUS}|; s|__DATA_NAME__|${DATA_NAME}|; s|__SUCCESS_UPDATE_BACKBONE__|${SUCCESS_UPDATE_BACKBONE}|; s|__RUN_TRAIN_SCRIPT__|${RUN_TRAIN_SCRIPT}|" launch_scripts/submit_train_template.yaml \
+    RUN_TRAIN_ARG="${SUCCESS_UPDATE_BACKBONE}"
+    if [[ "${RUN_TRAIN_SCRIPT}" == "run_train_composer.sh" ]]; then
+      RUN_TRAIN_ARG="${COMPOSE_K}"
+    fi
+    sed "s|__TASK__|${TASK}|; s|__MODEL__|${MODEL}|; s|__HF_MODEL__|${HF_MODEL}|; s|__GPUS__|${GPUS}|; s|__DATA_NAME__|${DATA_NAME}|; s|__RUN_TRAIN_ARG__|${RUN_TRAIN_ARG}|; s|__SFT_DATA_DESC__|${SFT_DATA_DESC}|; s|__RUN_TRAIN_SCRIPT__|${RUN_TRAIN_SCRIPT}|" launch_scripts/submit_train_template.yaml \
       | kubectl create -f -
   done
 done
