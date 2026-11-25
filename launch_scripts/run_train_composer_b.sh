@@ -1,14 +1,14 @@
 #!/bin/bash
 # SFT + RL for method_b_composed.
 # Usage: bash launch_scripts/run_train_composer_b.sh <task> <model_short_name> <hf_base_model> <data_name> [success_update_backbone] [compose_k] [alpha] [base] [sft_data_desc]
-# Arguments 5 and 9 are unused; this runner uses unsuffixed SFT datasets.
+# Arguments 3, 5 and 9 are unused; this runner uses unsuffixed SFT datasets.
+# SFT starts from the dated baseline_composed_rl checkpoint selected below.
 # Set SFT_MODEL=<path> to skip SFT and start RL from an existing checkpoint.
 
 set -euo pipefail
 
 TASK="$1"
 MODEL="$2"
-HF_MODEL="$3"
 DATA_NAME="$4"
 COMPOSE_K="${6:-${COMPOSE_K:-2}}"
 ALPHA="${7:-0.5}"
@@ -25,6 +25,22 @@ if [[ "${MODEL,,}" == *qwen3* ]]; then
 fi
 
 if [[ -z "${SFT_MODEL:-}" ]]; then
+  case "${MODEL}" in
+    qwen2.5-3b)
+      BASELINE_MODEL="models/math_o3/baseline_composed_rl/11_18-baseline_composed-qwen2.5-3b-k2/model"
+      ;;
+    qwen3-4b)
+      BASELINE_MODEL="models/math_o3/baseline_composed_rl/11_19-baseline_composed-qwen3-4b-k2/model"
+      ;;
+    *)
+      echo "No baseline RL checkpoint configured for ${MODEL} in $0." >&2
+      exit 1
+      ;;
+  esac
+  if [[ ! -f "${BASELINE_MODEL}/config.json" ]]; then
+    echo "Baseline RL checkpoint not found: ${BASELINE_MODEL}" >&2
+    exit 1
+  fi
   SFT_MODEL="models/${DATA_NAME}/${METHOD}_sft/${RUN_ID}/model"
   SFT_STEM="data/${DATA_NAME}/sft_datasets"
   python -m pipeline train_sft \
@@ -32,7 +48,7 @@ if [[ -z "${SFT_MODEL:-}" ]]; then
     --method "${METHOD}" \
     --compose-k "${COMPOSE_K}" \
     --run-id "${RUN_ID}" \
-    --base-model "${HF_MODEL}" \
+    --base-model "${BASELINE_MODEL}" \
     --data-name "${DATA_NAME}" \
     --max-length "${SFT_MAX_LENGTH}" \
     --dataset "${SFT_STEM}/sft_train__${METHOD}__k${COMPOSE_K}.json" \
