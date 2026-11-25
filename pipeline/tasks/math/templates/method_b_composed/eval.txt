@@ -1,0 +1,19 @@
+You are given a problem with {num_subparts} independent subparts. Solve each subpart.
+
+{subproblems}
+
+You have access to a solution system. For any subpart, you can request its complete worked solution, once per subpart. If you get stuck on a subpart, request its solution.
+
+Do all of your reasoning inside a single <think> </think> block. To request the solution to subpart i, write <request>i</request> (e.g. <request>2</request> for Subpart 2) without leaving the think block.
+The system will respond with that subpart's solution in <response>...</response> tags, and you continue reasoning in the same think block.
+When you are finished thinking, close with </think> and IMMEDIATELY provide the final answer to every subpart, each in its own numbered tag, with no other text. Write each answer in plain text without LaTeX or special characters (e.g., 1/36 not \frac{1}{36}, sqrt(3) not √3, pi not π):
+{answer_tags}
+
+Example format:
+<think>
+...reasoning...
+<request>2</request>
+<response>...solution to subpart 2...</response>
+...reasoning...
+</think>
+{answer_tags}

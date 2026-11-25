@@ -122,6 +122,7 @@ def make_loop(engine, **overrides):
         max_response_len=overrides.pop("max_response_len", 1024),
         answer_budget=overrides.pop("answer_budget", 0),
         nested_request=overrides.pop("nested_request", False),
+        subpart_requests=overrides.pop("subpart_requests", 0),
     )
     assert not overrides, f"unknown overrides: {overrides}"
     return HintLoop(engine=engine, tokenizer=TOKENIZER, config=config)
@@ -403,7 +404,42 @@ def test_nested_scaffold_does_not_reopen_the_think_block():
     assert tape.endswith("\n</think>\n\n<answer>7</answer>")
 
 
-# ------------------------------------------------------- driver equivalence
+# ---------------------------------------------------- subpart requests (composed)
+
+
+def run_subparts(script, answers=None, **config):
+    engine = ScriptedEngine(script, answers=answers)
+    loop = make_loop(engine, nested_request=True, subpart_requests=2, **config)
+    states = loop.make_states([prompt_for(0)], [["sol-1", "sol-2"]])
+    loop.run_rounds(states)
+    loop.force_answers(states)
+    return states[0]
+
+
+def test_subpart_request_serves_that_subparts_solution():
+    st = run_subparts({0: ["<request>2</request>", "<request>1</request>", "<request>2</request>",
+                           "</think><answer_1>1</answer_1><answer_2>2</answer_2>"]}, max_turns=5)
+    injected = [TOKENIZER.decode(p) for p in st.partials[2::2]]
+    assert injected[:2] == ["\n<response>sol-2</response>\n", "\n<response>sol-1</response>\n"]
+    # A subpart already served is an exhausted request.
+    assert injected[2] == "\n<response>No more hints available.</response>\n"
+    assert st.num_hints == 3 and st.completed and not st.malformed
+
+
+@pytest.mark.parametrize("request_text", ["<request>3</request>", "<request>0</request>",
+                                          "<request></request>", "<request>two</request>"])
+def test_subpart_request_needs_a_valid_id(request_text):
+    st = run_subparts({0: [request_text]})
+    assert st.malformed and st.completed and st.num_hints == 0
+
+
+def test_composed_forced_answer_opens_the_first_answer_tag():
+    st = run_subparts({0: ["<request>1</request>", "more thought" + "z" * 400]},
+                      answers={0: "4</answer_1><answer_2>5</answer_2>"},
+                      max_response_len=200, answer_budget=64)
+    tape = TOKENIZER.decode([t for seg in st.partials[1:] for t in seg])
+    assert st.forced == 1.0 and st.think_truncated == 1.0
+    assert tape.endswith("\n</think>\n\n<answer_1>4</answer_1><answer_2>5</answer_2>")
 
 
 def scripted_population(n, seed):

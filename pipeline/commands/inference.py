@@ -4,7 +4,7 @@ Inference commands - generation and evaluation.
 
 import random
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -390,6 +390,7 @@ def select_best_sample(
     exclude_exhausted: bool = False,
     rng=None,
     executor=None,
+    exclude_malformed: bool = False,
 ) -> dict | None:
     """
     Select the best sample from multiple generations.
@@ -425,6 +426,8 @@ def select_best_sample(
             fully serial loop into a concurrent one. Defaults to None, which
             preserves the original sequential behavior for callers that don't
             pass one.
+        exclude_malformed: Prefer samples whose metadata has no
+            `malformed_reason` (composed hint methods), like exclude_exhausted.
 
     Returns:
         Best sample dict with added 'correct' and 'metadata' fields
@@ -455,8 +458,21 @@ def select_best_sample(
     # then discard the whole problem even though a usable sample existed.
     # If every sample is exhausted, keep them: the record filter drops it, which
     # is the right outcome.
+    # Per-subpart pass rates over every sample (composed tasks): the probe uses
+    # them to aim forced requests at the subparts the model cannot solve.
+    flags = [s["metadata"].get("subpart_correct") for s in evaluated_samples
+             if isinstance(s.get("metadata"), dict)]
+    subpart_pass_rates = None
+    if flags and all(flags) and len({len(f) for f in flags}) == 1:
+        subpart_pass_rates = [sum(col) / len(col) for col in zip(*flags)]
+
     if exclude_exhausted:
         clean = [s for s in evaluated_samples if EXHAUSTED_MARKER not in s.get("text", "")]
+        if clean:
+            evaluated_samples = clean
+    if exclude_malformed:
+        clean = [s for s in evaluated_samples
+                 if not (isinstance(s.get("metadata"), dict) and s["metadata"].get("malformed_reason"))]
         if clean:
             evaluated_samples = clean
 
@@ -493,6 +509,8 @@ def select_best_sample(
     best_sample["pass_rate"] = len(correct_samples) / len(evaluated_samples)
     best_sample["num_correct_samples"] = len(correct_samples)
     best_sample["num_samples"] = len(evaluated_samples)
+    if subpart_pass_rates is not None:
+        best_sample["subpart_pass_rates"] = subpart_pass_rates
 
     return best_sample
 
@@ -519,9 +537,27 @@ def _wrap_composed_task(task, method, task_name: str):
         return task
     from pipeline.core.composed import ComposedTask, check_composed_task
     check_composed_task(task_name)
-    if method.multi_turn:
-        raise ValueError("Composed methods do not support multi-turn hints yet")
-    return ComposedTask(task)
+    return ComposedTask(task, subpart_requests=method.subpart_requests)
+
+
+def _check_subpart_generation(method, multi_turn: bool, use_async: bool) -> int:
+    """K for GenerationConfig.subpart_requests (0 when unused). Subpart
+    requests are only implemented in the async multi-turn generator."""
+    if method is None or not method.subpart_requests:
+        return 0
+    if multi_turn and not use_async:
+        raise ValueError(f"{method.name}: composed hint methods need --use-async")
+    return method.compose_k
+
+
+def subpart_force_order(pass_rates: list[float] | None, k: int, rng) -> list[int]:
+    """Subpart ids for forced requests, hardest (lowest probe pass rate) first;
+    random order without a probe. Ties are broken randomly."""
+    ids = list(range(1, k + 1))
+    rng.shuffle(ids)
+    if pass_rates:
+        ids.sort(key=lambda i: pass_rates[i - 1])
+    return ids
 
 
 def copy_source_fields(record: dict, prompt_data: dict) -> None:
@@ -671,6 +707,7 @@ def generate(
             print("--no-hints: forcing single-turn so --num-samples yields a "
                   "graded pass rate (method config requested multi-turn).")
         multi_turn = False
+    subpart_k = _check_subpart_generation(method, multi_turn, use_async)
 
     # Resolve model shortcuts (sft, rl)
     actual_model_name = model_name
@@ -720,6 +757,7 @@ def generate(
         hint_transition=method.hint_transition if method else True,
         nested_request=method.nested_request if method else False,
         answer_budget=answer_budget,
+        subpart_requests=subpart_k,
     )
     generator = Generator(config)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -874,6 +912,20 @@ def generate(
         else:
             force_hints_list = [0] * len(remaining_prompts)
 
+        # Subpart-request methods: which subparts forced requests name, hardest
+        # first by the probe's per-subpart pass rates (random order without one).
+        force_order_list = None
+        if subpart_k and multi_turn:
+            subpart_rates = {}
+            if hint_schedule_from is not None:
+                subpart_rates = {r["index"]: r.get("subpart_pass_rates")
+                                 for r in load_json(hint_schedule_from)}
+            force_order_list = [
+                subpart_force_order(subpart_rates.get(p["index"]), subpart_k,
+                                    random.Random((seed or 0) + p["index"]))
+                for p in remaining_prompts
+            ]
+
         # For async multi-turn, process all remaining prompts at once
         if multi_turn and use_async:
             import asyncio
@@ -891,6 +943,8 @@ def generate(
             rep_prompts = [p for p in all_prompts for _ in range(num_samples)]
             rep_gts = [g for g in all_ground_truths for _ in range(num_samples)]
             rep_force = [f for f in force_hints_list for _ in range(num_samples)]
+            rep_order = ([o for o in force_order_list for _ in range(num_samples)]
+                         if force_order_list is not None else None)
             print(f"Running async generation on {len(all_prompts)} prompts"
                   + (f" x {num_samples} samples = {len(rep_prompts)} rollouts..."
                      if num_samples > 1 else "..."))
@@ -901,6 +955,7 @@ def generate(
                         rep_prompts,
                         rep_gts,
                         force_hints=rep_force,
+                        force_order=rep_order,
                     )
                 )
             finally:
@@ -933,7 +988,8 @@ def generate(
                     best_sample = select_best_sample(gen_samples, task, primitive,
                                                      strategy=sample_strategy,
                                                      exclude_exhausted=drop_exhausted,
-                                                     rng=_rng, executor=correctness_pool)
+                                                     rng=_rng, executor=correctness_pool,
+                                                     exclude_malformed=bool(subpart_k))
                     if best_sample is None:
                         # strategy="random_correct" and nothing was correct.
                         n_no_correct += 1
@@ -959,7 +1015,7 @@ def generate(
                     "metadata": best_sample["metadata"],
                     "extracted_hints": extract_generation_hints(best_sample["text"]),
                     **{k: best_sample[k] for k in
-                       ("pass_rate", "num_correct_samples", "num_samples")
+                       ("pass_rate", "num_correct_samples", "num_samples", "subpart_pass_rates")
                        if k in best_sample},
                 }
 
@@ -977,6 +1033,19 @@ def generate(
             if n_no_correct:
                 print(f"Dropped {n_no_correct} problem(s) with no correct sample "
                       f"(--sample-strategy random_correct).")
+            if subpart_k:
+                # Strict: a malformed request (bad id, repeated subpart, exhausted
+                # pool, broken grammar) must never become SFT text.
+                dropped = [r for r in records if r["metadata"].get("malformed_reason")]
+                reasons = Counter(r["metadata"]["malformed_reason"] for r in dropped)
+                records = [r for r in records if not r["metadata"].get("malformed_reason")]
+                if dropped:
+                    dropped_path = output_path.with_suffix(".malformed.json")
+                    save_json(dropped_path, dropped)
+                    print(f"Dropped {len(dropped)} malformed record(s) {dict(reasons)} "
+                          f"(composed subpart requests), saved to {dropped_path}.")
+                    kept = {r["index"] for r in records}
+                    records_by_index = {i: r for i, r in records_by_index.items() if i in kept}
             if drop_exhausted:
                 records, n_dropped = drop_exhausted_records(records)
                 if n_dropped:
@@ -1082,7 +1151,7 @@ def generate(
                             "metadata": best_sample["metadata"],
                             "extracted_hints": extract_generation_hints(best_sample["text"]),
                             **{k: best_sample[k] for k in
-                               ("pass_rate", "num_correct_samples", "num_samples")
+                               ("pass_rate", "num_correct_samples", "num_samples", "subpart_pass_rates")
                                if k in best_sample},
                             "forced_answer": best_sample.get("forced_answer", False),
                             "answer_truncated": best_sample.get("answer_truncated", False),
@@ -1171,7 +1240,8 @@ def generate(
                     best_sample = select_best_sample(gen_samples, task, primitive,
                                                      strategy=sample_strategy,
                                                      exclude_exhausted=drop_exhausted,
-                                                     rng=_rng, executor=correctness_pool)
+                                                     rng=_rng, executor=correctness_pool,
+                                                     exclude_malformed=bool(subpart_k))
                     if best_sample is None:
                         # strategy="random_correct" and nothing was correct.
                         n_no_correct += 1
@@ -1200,7 +1270,7 @@ def generate(
                     "metadata": best_sample["metadata"],
                     "extracted_hints": extract_generation_hints(best_sample["text"]),
                     **{k: best_sample[k] for k in
-                       ("pass_rate", "num_correct_samples", "num_samples")
+                       ("pass_rate", "num_correct_samples", "num_samples", "subpart_pass_rates")
                        if k in best_sample},
                 }
 
@@ -1549,6 +1619,7 @@ def evaluate(
         seed=seed,
         nested_request=method.nested_request if method else False,
         ban_hint_requests=no_hints,
+        subpart_requests=_check_subpart_generation(method, multi_turn, use_async),
     )
     generator = Generator(config)
 

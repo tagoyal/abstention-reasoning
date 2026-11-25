@@ -1,0 +1,21 @@
+# method_b over composed datapoints (K problems, <answer_i> tags; see
+# baseline_composed). One hint per subpart: the subpart's complete solution
+# (all of its hint_exprs joined). The model names the subpart it wants with
+# <request>i</request>; ids outside 1..K are malformed, and asking for a
+# subpart already given gets "No more hints available." (an exhausted
+# request). max_hints is set to K from --compose-k.
+# Reward: min over subparts (all K must be correct), then the hint penalty
+# for the total number of hints used (verl/recipe/shared/composed_reward.py).
+template_variant: method_b_composed
+composed: true
+reward_function: compute_score_hint
+multi_turn: true
+max_turns: 6
+mask_response_tokens: true
+hint_transition: false
+nested_request: true
+reward_kwargs:
+  hint_penalty: 0.1
+  format_score: 0.1
+  exhausted_penalty: 0.2
+  max_exhausted_requests: 2

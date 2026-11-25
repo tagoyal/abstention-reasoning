@@ -9,6 +9,7 @@ Commands:
     list_methods                List available methods for a task
     create_primitives           Generate raw puzzle data
     create_prompts              Create prompts from primitives
+    stitch_composed_sft         Composed SFT data stitched from single-problem generations
     create_ood_prompts          Create eval prompts from an OOD math benchmark
     generate                    Run model on prompts to create dataset
     train_sft                   Train SFT model on generated dataset
@@ -105,6 +106,21 @@ def cmd_create_partitions(args):
         output_dir=Path(args.output) if args.output else None,
         seed=args.seed,
         data_name=args.data_name,
+    )
+
+
+def cmd_stitch_composed_sft(args):
+    """Stitch composed SFT data."""
+    commands.stitch_composed_sft(
+        task_name=args.task,
+        method_name=args.method,
+        compose_k=args.compose_k,
+        split_name=args.split,
+        source_path=Path(args.source),
+        data_name=args.data_name,
+        rounds=args.rounds,
+        seed=args.seed,
+        output_path=Path(args.output) if args.output else None,
     )
 
 
@@ -406,6 +422,7 @@ def cmd_train_sft(args):
         completion_only_loss=args.completion_only_loss,
         data_name=args.data_name,
         models_name=args.models_name,
+        model_dtype=args.model_dtype,
     )
 
 
@@ -588,6 +605,26 @@ def main():
              "{split}__{method}__k{K} artifacts.")
     p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
     p.set_defaults(func=cmd_create_prompts)
+
+    # stitch_composed_sft
+    p = subparsers.add_parser("stitch_composed_sft",
+        help="Composed SFT data stitched from correct single-problem generations")
+    p.add_argument("--task", required=True, help="Task name (math or countdown)")
+    p.add_argument("--method", default="baseline_composed",
+        help="Composed method without subpart requests (default: baseline_composed)")
+    p.add_argument("--compose-k", type=int, required=True, help="Problems per datapoint")
+    p.add_argument("--split", required=True, help="Partition the source generations came from (e.g. sft_train)")
+    p.add_argument("--source", required=True,
+        help="Single-problem generate output on that split, e.g. --method baseline "
+             "--num-samples 8 --sample-strategy random_correct")
+    p.add_argument("--rounds", type=int, default=1,
+        help="Groupings of the solved problems (seed, seed+1, ...); each solved problem "
+             "appears in up to this many datapoints")
+    p.add_argument("--seed", type=int, default=42, help="Grouping seed")
+    p.add_argument("--output",
+        help="Output path (default: data/{data_name}/sft_datasets/{split}__{method}__k{K}__stitched.json)")
+    p.add_argument("--data-name", help="Data directory name under data/ (default: task name)")
+    p.set_defaults(func=cmd_stitch_composed_sft)
 
     # create_verification_data
     p = subparsers.add_parser(
@@ -869,6 +906,8 @@ def main():
     p.add_argument("--warmup-ratio", type=float, default=0.1, help="Warmup ratio")
     p.add_argument("--max-length", type=int, default=4096, help="Maximum sequence length")
     p.add_argument("--no-bf16", action="store_true", help="Disable bfloat16 training")
+    p.add_argument("--model-dtype", choices=["bfloat16", "float16", "float32", "auto"],
+                   help="Model-loading dtype (default: loader's FP32 default)")
     p.add_argument("--report-to", default="wandb", help="Reporting integration (wandb, none)")
     p.add_argument("--project-name", help="Wandb project name (default: {task}-sft)")
     p.add_argument("--experiment-name", help="Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})")

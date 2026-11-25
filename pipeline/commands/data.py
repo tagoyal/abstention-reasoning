@@ -4,7 +4,9 @@ Data commands - primitives and prompts creation.
 
 import gc
 import inspect
+import json
 import random
+import re
 import time
 from pathlib import Path
 
@@ -526,6 +528,54 @@ def _create_prompts_single(
     return output_path
 
 
+def composed_solution_hint(primitive: dict, task_name: str) -> str:
+    """A subpart's full solution for composed hint methods.
+
+    Countdown hints are progressive subexpressions whose last one is the whole
+    answer expression, so the last hint alone is the solution. Math hints are
+    solution steps, so all of them are joined in order.
+    """
+    hints = _extract_hints_list(primitive)
+    if not hints:
+        raise ValueError(f"Problem {primitive.get('index')} has no hints to build a solution from")
+    if task_name == "countdown":
+        return str(hints[-1]).strip()
+    return "\n".join(str(h).strip() for h in hints)
+
+
+def _composed_base_record(task, task_name: str, method: "Method", group: list[dict],
+                          group_index: int, split_name: str) -> dict:
+    """Everything in a composed record except the rendered prompt."""
+    ground_truth = {
+        "num_subparts": len(group),
+        "source_indices": [p["index"] for p in group],
+        "subproblems": [task.get_ground_truth(p) for p in group],
+    }
+    if method.subpart_requests:
+        # Hint i is subpart i's complete solution. The rollout reads
+        # ground_truth["hint_exprs"] and serves <request>i</request> with entry i-1.
+        ground_truth["hint_exprs"] = [composed_solution_hint(p, task_name) for p in group]
+    return {
+        "index": group_index,
+        "ground_truth": ground_truth,
+        "variant": f"composed_k{len(group)}",
+        "split": split_name,
+        "source_indices": ground_truth["source_indices"],
+        "source_variants": [p.get("variant", "unknown") for p in group],
+    }
+
+
+def _composed_messages(system_message: str | None, user_content: str,
+                       assistant_prefix: str | None) -> list[dict]:
+    messages = []
+    if system_message:
+        messages.append({"role": "system", "content": system_message})
+    messages.append({"role": "user", "content": user_content})
+    if assistant_prefix:
+        messages.append({"role": "assistant", "content": assistant_prefix})
+    return messages
+
+
 def _create_composed_prompts_single(
     task,
     task_name: str,
@@ -566,25 +616,13 @@ def _create_composed_prompts_single(
     is_parquet = str(output_path).endswith(".parquet")
     subproblem_template = load_subproblem_template(task_name, method.template_variant)
     template = method.load_template(task_name, split_name.split("_")[0])
-    variant = f"composed_k{k}"
     system_message = getattr(task, "system_message", None)
 
     records = []
     for group_index, group in enumerate(groups):
         fields = build_composed_fields(group, subproblem_template)
-        ground_truth = {
-            "num_subparts": k,
-            "source_indices": [p["index"] for p in group],
-            "subproblems": [task.get_ground_truth(p) for p in group],
-        }
-        record = {
-            "index": group_index,
-            "ground_truth": ground_truth,
-            "variant": variant,
-            "split": split_name,
-            "source_indices": ground_truth["source_indices"],
-            "source_variants": [p.get("variant", "unknown") for p in group],
-        }
+        record = _composed_base_record(task, task_name, method, group, group_index, split_name)
+        ground_truth = record["ground_truth"]
         if is_parquet:
             # verl renders `primitive` into rl.txt at train time.
             record.update({
@@ -595,13 +633,9 @@ def _create_composed_prompts_single(
                 "reward_model": {"style": "rule", "ground_truth": ground_truth},
             })
         else:
-            messages = []
-            if system_message:
-                messages.append({"role": "system", "content": system_message})
-            messages.append({"role": "user", "content": render_fields(template, fields)})
-            if include_assistant_prefix and assistant_prefix:
-                messages.append({"role": "assistant", "content": assistant_prefix})
-            record["prompt"] = messages
+            record["prompt"] = _composed_messages(
+                system_message, render_fields(template, fields),
+                assistant_prefix if include_assistant_prefix else None)
         records.append(record)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -612,6 +646,162 @@ def _create_composed_prompts_single(
     dropped = len(problems) - len(groups) * k
     print(f"Saved {len(records)} composed records (K={k}, {len(problems)} problems, "
           f"{dropped} left over) to {output_path}")
+    return output_path
+
+
+_SINGLE_ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
+_STITCH_FORBIDDEN = ("<think>", "<answer", "</answer", "<request", "<response")
+
+
+def _single_problem_trace(generation: str) -> tuple[str, str] | None:
+    """(reasoning, answer) from a single-problem `...</think> <answer>x</answer>`
+    generation, or None if it is not exactly that shape."""
+    if generation.count("</think>") != 1:
+        return None
+    reasoning, tail = generation.split("</think>")
+    answers = _SINGLE_ANSWER_RE.findall(tail)
+    if len(answers) != 1 or _SINGLE_ANSWER_RE.sub("", tail).strip():
+        return None
+    if any(tag in reasoning for tag in _STITCH_FORBIDDEN):
+        return None
+    reasoning, answer = reasoning.strip(), answers[0].strip()
+    if not reasoning or not answer:
+        return None
+    return reasoning, answer
+
+
+def stitched_composed_generation(traces: list[tuple[str, str]]) -> str:
+    """One composed generation from K single-problem (reasoning, answer) traces.
+
+    It continues the assistant prefill, so it starts inside the think block:
+    each subpart's reasoning under a `Subpart i:` header (the prompt's own
+    labels), one </think>, then the K numbered answer tags.
+    """
+    body = "\n\n".join(f"Subpart {i}: {reasoning}" for i, (reasoning, _) in enumerate(traces, start=1))
+    answers = "\n".join(f"<answer_{i}> {answer} </answer_{i}>" for i, (_, answer) in enumerate(traces, start=1))
+    return f"\n\n{body}\n</think>\n\n{answers}"
+
+
+def stitch_composed_sft(
+    task_name: str,
+    method_name: str,
+    compose_k: int,
+    split_name: str,
+    source_path: Path,
+    data_name: str | None = None,
+    rounds: int = 1,
+    seed: int = 42,
+    output_path: Path | None = None,
+) -> Path:
+    """Composed SFT data stitched from correct single-problem generations.
+
+    source_path is a single-problem `generate` output on the same split (e.g.
+    --method baseline --sample-strategy random_correct). Every correct, cleanly
+    formatted trace is matched to its partition problem; the solved problems are
+    then grouped into K-groups exactly like create_prompts does, once per round
+    with seed + round, so each solved problem appears in up to `rounds`
+    datapoints (repeated groups are skipped). Prompts are rendered as
+    create_prompts would; targets come from stitched_composed_generation and
+    are re-graded, so every kept record is correct by construction.
+
+    Only methods without subpart requests: a stitched trace never asks for a hint.
+    """
+    from pipeline.core.composed import (
+        ComposedTask,
+        build_composed_fields,
+        check_composed_task,
+        group_disjoint,
+        load_subproblem_template,
+        render_fields,
+    )
+
+    data_name = resolve_data_name(task_name, data_name)
+    check_composed_task(task_name)
+    method = Method.load(method_name, task_name)
+    method.set_compose_k(compose_k)
+    if not method.composed or method.subpart_requests:
+        raise ValueError(f"stitch_composed_sft needs a composed method without subpart requests, got {method_name}")
+    if rounds < 1:
+        raise ValueError(f"rounds must be >= 1, got {rounds}")
+    task = get_task(task_name)
+    k = method.compose_k
+
+    problems = load_json(partition_path(data_name, split_name))
+    by_index = {p["index"]: p for p in problems}
+    gt_key = lambda gt: json.dumps(gt, sort_keys=True, default=str)
+    by_gt: dict[str, list[dict]] = {}
+    for p in problems:
+        by_gt.setdefault(gt_key(task.get_ground_truth(p)), []).append(p)
+
+    traces: dict = {}
+    counts = {"source": 0, "correct": 0, "bad_format": 0, "unmatched": 0, "regrade_failed": 0}
+    for rec in load_json(source_path):
+        counts["source"] += 1
+        if not rec.get("correct"):
+            continue
+        counts["correct"] += 1
+        trace = _single_problem_trace(rec.get("generation", ""))
+        if trace is None:
+            counts["bad_format"] += 1
+            continue
+        # The record index is the partition index; fall back to a unique ground-truth match.
+        problem = by_index.get(rec.get("index"))
+        if problem is None or gt_key(task.get_ground_truth(problem)) != gt_key(rec.get("ground_truth")):
+            candidates = by_gt.get(gt_key(rec.get("ground_truth")), [])
+            problem = candidates[0] if len(candidates) == 1 else None
+        if problem is None:
+            counts["unmatched"] += 1
+            continue
+        ok, _ = task.check_correctness(task.get_ground_truth(problem), f"<answer>{trace[1]}</answer>")
+        if not ok:
+            counts["regrade_failed"] += 1
+            continue
+        traces.setdefault(problem["index"], (trace, rec))
+
+    solved = [p for p in problems if p["index"] in traces]
+    groups, seen = [], set()
+    for r in range(rounds):
+        for group in group_disjoint(solved, k, seed + r):
+            key = frozenset(p["index"] for p in group)
+            if key not in seen:
+                seen.add(key)
+                groups.append(group)
+
+    subproblem_template = load_subproblem_template(task_name, method.template_variant)
+    template = method.load_template(task_name, split_name.split("_")[0])
+    system_message = getattr(task, "system_message", None)
+    assistant_prefix = getattr(task, "assistant_prefix", None)
+    composed_task = ComposedTask(task)
+
+    records = []
+    for group in groups:
+        record = _composed_base_record(task, task_name, method, group, len(records), split_name)
+        fields = build_composed_fields(group, subproblem_template)
+        record["prompt"] = _composed_messages(system_message, render_fields(template, fields), assistant_prefix)
+        generation = stitched_composed_generation([traces[p["index"]][0] for p in group])
+        correct, metadata = composed_task.check_correctness(record["ground_truth"], generation)
+        if not correct:
+            counts["regrade_failed"] += 1
+            continue
+        sources = [traces[p["index"]][1] for p in group]
+        record.update({
+            "generation": generation,
+            "correct": True,
+            "finish_reason": "stop",
+            "token_count": sum(int(s.get("token_count") or 0) for s in sources),
+            "metadata": metadata,
+            "stitched_from": str(source_path),
+        })
+        records.append(record)
+
+    if output_path is None:
+        output_path = method.dataset_path(data_name, split_name, desc="stitched")
+    save_json(output_path, records)
+    print(f"{split_name}: {counts['correct']}/{counts['source']} source generations correct; "
+          f"dropped {counts['bad_format']} badly formatted, {counts['unmatched']} unmatched, "
+          f"{counts['regrade_failed']} failing re-grade")
+    print(f"{len(solved)}/{len(problems)} problems solved; {rounds} round(s) -> "
+          f"{len(records)} stitched K={k} datapoints saved to {output_path}")
     return output_path
 
 

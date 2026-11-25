@@ -74,6 +74,8 @@ NESTED_HINT_CYCLE = ["<request>", "</request>", "<response>", "</response>"]
 
 VALID_REQUEST = "<request></request>"
 _VALID_REQUEST_RE = re.compile(re.escape(VALID_REQUEST))
+# Composed hint methods name the subpart: <request>i</request>, 1 <= i <= K.
+_SUBPART_REQUEST_RE = re.compile(r"<request>(\d+)</request>")
 _ANSWER_RE = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 
 
@@ -135,6 +137,19 @@ class HintLoopConfig:
     answer_budget: int = 0
     # Requests live inside the <think> block rather than after it.
     nested_request: bool = False
+    # Composed hint methods: K > 0 makes requests name a subpart,
+    # <request>i</request>, served with hints[i-1] (that subpart's solution).
+    # A subpart already served gets "No more hints available." instead.
+    subpart_requests: int = 0
+
+    @property
+    def answer_open(self) -> str:
+        """Tag a forced answer starts with: composed answers run <answer_1>..<answer_K>."""
+        return "<answer_1>" if self.subpart_requests else "<answer>"
+
+    @property
+    def answer_close(self) -> str:
+        return f"</answer_{self.subpart_requests}>" if self.subpart_requests else "</answer>"
 
 
 @dataclass
@@ -149,6 +164,8 @@ class RolloutState:
     masks: List[List[int]] = field(default_factory=list)
     num_hints: float = 0.0
     last_given: int = -1
+    # Subparts already served (subpart_requests mode).
+    given_subparts: set = field(default_factory=set)
     response_len: int = 0
     truncated: float = 0.0
     forced: float = 0.0
@@ -201,7 +218,7 @@ class HintLoop:
         self.tokenizer = tokenizer
         self.config = config
         self._log = log if log is not None else (lambda msg: None)
-        self._closing_tokens = self._encode("</answer>")
+        self._closing_tokens = self._encode(config.answer_close)
         self._no_more_hints_tokens = self._encode(NO_MORE_HINTS)
 
     # ---------------------------------------------------------------- helpers
@@ -279,7 +296,15 @@ class HintLoop:
             return False
 
         if "</request>" in text:
-            if _VALID_REQUEST_RE.search(text) is None:
+            subpart = None
+            if self.config.subpart_requests:
+                match = _SUBPART_REQUEST_RE.search(text)
+                if match is not None and 1 <= int(match.group(1)) <= self.config.subpart_requests:
+                    subpart = int(match.group(1))
+                valid = subpart is not None
+            else:
+                valid = _VALID_REQUEST_RE.search(text) is not None
+            if not valid:
                 # A request with anything inside fails the validator's tightness
                 # check, so there is nothing to rescue.
                 st.malformed = True
@@ -288,7 +313,9 @@ class HintLoop:
                     f"Malformed <request> tag detected in output: {text[:200]}..."))
                 return False
             st.num_hints += 1
-            if st.num_hints > self.config.max_hints:
+            if subpart is not None:
+                self._inject_subpart_hint(st, subpart)
+            elif st.num_hints > self.config.max_hints:
                 self._append_environment_turn(st, self._no_more_hints_tokens)
             else:
                 self._inject_hint(st)
@@ -302,6 +329,19 @@ class HintLoop:
         # and the reward function will score it accordingly.
         st.completed = True
         return False
+
+    def _inject_subpart_hint(self, st: RolloutState, subpart: int) -> None:
+        if subpart in st.given_subparts or subpart > len(st.hints):
+            self._append_environment_turn(st, self._no_more_hints_tokens)
+            return
+        st.given_subparts.add(subpart)
+        hint_text = st.hints[subpart - 1]
+        injection = hint_injection(hint_text, self.config.nested_request)
+        tokens = self._encode(injection)
+        self._sample_log(8, lambda: (
+            f"\n+++ INJECTING SUBPART {subpart} SOLUTION +++\nHint: {hint_text!r}\n"
+            f"Num tokens: {len(tokens)}"))
+        self._append_environment_turn(st, tokens)
 
     def _inject_hint(self, st: RolloutState) -> None:
         next_idx = st.last_given + 1
@@ -470,7 +510,7 @@ class HintLoop:
             # produced "</answer></answer>", which the structure validator
             # rejects -- the forced answers were scored 0 for being malformed,
             # the exact failure this forcing exists to prevent.
-            if self.tokenizer.decode(gen.token_ids).rstrip().endswith("</answer>"):
+            if self.tokenizer.decode(gen.token_ids).rstrip().endswith(self.config.answer_close):
                 st.think_truncated = 1.0
             else:
                 st.append(self._closing_tokens, trainable=False)
@@ -488,6 +528,12 @@ class HintLoop:
         """
         # A <request> with anything inside is unrecoverable: the validator
         # rejects the response on a tightness check before it parses any tags.
+        if self.config.subpart_requests:
+            k = self.config.subpart_requests
+            valid = sum(1 <= int(m) <= k for m in _SUBPART_REQUEST_RE.findall(text))
+            if text.count("<request>") != valid:
+                return None
+            return self._answer_scaffold_composed(text)
         if text.count("<request>") != len(_VALID_REQUEST_RE.findall(text)):
             return None
 
@@ -522,6 +568,23 @@ class HintLoop:
                 # cycle so the tag sequence stays parseable.
                 return "<response>No more hints available.</response>\n<think>\n</think>\n\n<answer>"
             return None
+
+    def _answer_scaffold_composed(self, text: str) -> Optional[str]:
+        """Nested-grammar scaffold opening <answer_1> instead of <answer>.
+
+        A truncation after </think> is past the point of rescue: the numbered
+        answer tags are not in TAG_PATTERN, so a partial answer block cannot be
+        walked, and only an empty one can be opened.
+        """
+        cut = text.rfind("</think>")
+        if cut >= 0:
+            if text[cut + len("</think>"):].strip():
+                return None
+            text = text[:cut + len("</think>")]
+        scaffold = self._answer_scaffold_nested(text)
+        if scaffold is None or not scaffold.endswith("<answer>"):
+            return None
+        return scaffold[:-len("<answer>")] + self.config.answer_open
 
     def _answer_scaffold_nested(self, text: str) -> Optional[str]:
         """answer_scaffold for inline requests: one think block, closed once.

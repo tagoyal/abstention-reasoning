@@ -152,6 +152,7 @@ def train_sft(
     strip_think_tokens: bool = False,
     data_name: str | None = None,
     models_name: str | None = None,
+    model_dtype: str | None = None,
 ) -> Path:
     """
     Train an SFT model on generated dataset.
@@ -186,6 +187,7 @@ def train_sft(
         warmup_ratio: Warmup ratio
         max_length: Maximum sequence length
         bf16: Use bfloat16 training
+        model_dtype: Optional model-loading dtype (default: loader's FP32 default)
         report_to: Reporting integration ("none", "wandb", etc.)
         project_name: Wandb project name (default: {task}-sft)
         experiment_name: Custom experiment name (default: {method}-{run_id}-{YYYYMMDD})
@@ -275,8 +277,12 @@ def train_sft(
     print(f"Loading dataset from {dataset_path}")
     data = load_json(dataset_path)
 
-    # Get task for potential custom filtering
+    # Get task for potential custom filtering. Composed methods filter with the
+    # composed wrapper (all-K correctness; strict request checks for hint methods).
     task = get_task(task_name)
+    if method is not None and method.composed:
+        from pipeline.commands.inference import _wrap_composed_task
+        task = _wrap_composed_task(task, method, task_name)
 
     # Use task-specific filter if available, otherwise keep only correct
     if hasattr(task, 'filter_for_sft'):
@@ -510,6 +516,7 @@ def train_sft(
         metric_for_best_model="eval_loss" if has_eval else None,
         greater_is_better=False if has_eval else None,
         bf16=bf16,
+        model_init_kwargs={"dtype": model_dtype} if model_dtype else None,
         report_to=report_to,
         run_name=experiment_name,
     )
@@ -1263,8 +1270,6 @@ def train_rl(
     if method_name is not None:
         method = Method.load(method_name, task_name)
         method.set_compose_k(compose_k)
-        if method.composed and method.multi_turn:
-            raise NotImplementedError("composed methods do not support multi-turn rollouts")
 
     # Validate mutual exclusion
     if base_model is not None and sft_model_path is not None:
@@ -1661,6 +1666,9 @@ def train_rl(
     # hint exchanges instead of closing and reopening it around each one.
     if method is not None and method.nested_request:
         cmd.append("+actor_rollout_ref.rollout.nested_request=True")
+    # Composed hint methods: <request>i</request> asks for subpart i's solution.
+    if method is not None and method.subpart_requests:
+        cmd.append(f"+actor_rollout_ref.rollout.subpart_requests={method.compose_k}")
 
     # Add reward kwargs if specified in method config
     # Use + prefix to add new config keys

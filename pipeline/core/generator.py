@@ -40,15 +40,22 @@ def _keep_first_sentences(tail: str, k: int) -> tuple[str, bool]:
     """Cut tail after its k-th sentence. Returns (text, whether a cut was made).
 
     Boundaries need whitespace after the punctuation, so decimals like 3.5 are
-    not split. A tail with k or fewer sentences is returned unchanged.
+    not split. Leading whitespace (e.g. "\n\n" right after a prefill or a
+    </response>) is not a sentence. A tail with k or fewer sentences is
+    returned unchanged.
     """
-    for i, m in enumerate(_SENTENCE_BOUNDARY_RE.finditer(tail), start=1):
+    i = 0
+    for m in _SENTENCE_BOUNDARY_RE.finditer(tail):
+        if not tail[:m.start()].strip():
+            continue
+        i += 1
         if i == k and m.end() < len(tail.rstrip()):
             return tail[:m.start()], True
     return tail, False
 
 
-def _close_think_for_request(text: str, transition: str | None, nested: bool = False, rng=None) -> str:
+def _close_think_for_request(text: str, transition: str | None, nested: bool = False, rng=None,
+                             answer_open: str = "<answer>") -> str:
     """Prepare the CoT so a forced <request></request> can follow it.
 
     nested=False puts the request outside the think block, so the block is
@@ -83,7 +90,7 @@ def _close_think_for_request(text: str, transition: str | None, nested: bool = F
     head, tail = text[:split], text[split:]
 
     had_think = "</think>" in tail
-    for tag in ("<answer>", "</think>"):
+    for tag in (answer_open, "</think>"):
         pos = tail.rfind(tag)
         if pos >= 0:
             tail = tail[:pos]
@@ -142,6 +149,62 @@ def _hint_injection(hint: str, nested: bool) -> str:
     """The environment's turn: the hint, plus a reopened think block if the
     request lives outside one. Inline requests never left the block."""
     return f"\n<response>{hint}</response>\n" if nested else f"\n<response>{hint}</response>\n<think>\n"
+
+
+_SUBPART_REQUEST_RE = re.compile(r"<request>(.*?)</request>", re.DOTALL)
+
+
+class _HintPool:
+    """Which hint a request is served, for one rollout.
+
+    Sequential (subparts=0): every <request></request> gets the next hint.
+    Subpart requests (composed methods): <request>i</request> gets hints[i-1],
+    once; a repeat, an unknown id or any other request content is answered
+    with the exhausted placeholder, which the strict SFT filter then drops.
+    Forced requests pick subparts from force_order (hardest first), falling
+    back to the lowest id not yet given.
+    """
+
+    def __init__(self, hints: list, subparts: int = 0, force_order: list[int] | None = None):
+        self.hints = hints
+        self.subparts = subparts
+        self.force_order = list(force_order or [])
+        self.last = -1
+        self.given: set[int] = set()
+
+    def has_more(self) -> bool:
+        if self.subparts:
+            return len(self.given) < min(self.subparts, len(self.hints))
+        return self.last + 1 < len(self.hints)
+
+    def serve(self, generated_text: str) -> str | None:
+        """Hint for the request that ended generated_text, or None (exhausted)."""
+        if not self.subparts:
+            if not self.has_more() or self.hints[self.last + 1] is None:
+                return None
+            self.last += 1
+            return self.hints[self.last]
+        matches = _SUBPART_REQUEST_RE.findall(generated_text)
+        content = matches[-1] if matches else ""
+        if not re.fullmatch(r"\d+", content):
+            return None
+        sid = int(content)
+        if not 1 <= sid <= min(self.subparts, len(self.hints)) or sid in self.given:
+            return None
+        self.given.add(sid)
+        return self.hints[sid - 1]
+
+    def force(self) -> tuple[str, str]:
+        """(request tag, hint) for a forced request. Caller checks has_more()."""
+        if not self.subparts:
+            self.last += 1
+            return "<request></request>", self.hints[self.last]
+        avail = range(1, min(self.subparts, len(self.hints)) + 1)
+        sid = next((i for i in self.force_order if i in avail and i not in self.given), None)
+        if sid is None:
+            sid = next(i for i in avail if i not in self.given)
+        self.given.add(sid)
+        return f"<request>{sid}</request>", self.hints[sid - 1]
 
 
 DEFAULT_STOP_STRINGS = ["</answer>"]
@@ -203,6 +266,9 @@ class GenerationConfig:
                                # quota (0 included) it cannot request another. Async only.
     answer_budget: int = 0  # Tokens held back for a forced answer when a generation
                             # runs out of room mid-thought. 0 disables forcing.
+    subpart_requests: int = 0  # Composed hint methods: K. Requests name a subpart,
+                               # <request>i</request>, and answers end at </answer_K>.
+                               # Async only.
 
 
 class _SamplingParams:
@@ -1244,6 +1310,7 @@ class AsyncGenerator(_SamplingParams):
         answer_tag: str = "</answer>",
         force_hints: int | list[int] = 0,
         force_hint_token_range: tuple[int, int] = (100, 500),
+        force_order: list[list[int]] | None = None,
     ) -> list[list[dict]]:
         """
         Async multi-turn generation with hint injection.
@@ -1259,6 +1326,8 @@ class AsyncGenerator(_SamplingParams):
             force_hints: Force at least this many hints per example by intercepting
                 </think> tags and injecting hint requests (default: 0, disabled)
             force_hint_token_range: (min, max) token cap for forced-hint turns.
+            force_order: Per prompt, the subpart ids forced requests name, in
+                order (config.subpart_requests only; default lowest id first).
 
         Returns:
             List of lists of dicts with 'text', 'finish_reason', 'token_count', 'num_hints'
@@ -1286,22 +1355,27 @@ class AsyncGenerator(_SamplingParams):
         any_forcing = any(f > 0 for f in force_hints_per)
 
         request_tag = _request_tag_for(self.config, request_tag, any_forcing)
+        k = self.config.subpart_requests
+        if k:
+            answer_tag = f"</answer_{k}>"
+        pools = [_HintPool(h, k, force_order[i] if force_order else None)
+                 for i, h in enumerate(hints_list)]
 
         if any_forcing or self.config.exact_hints:
             return await self._generate_with_hints_async_text_based(
-                prompts, hints_list, force_hints_per,
+                prompts, pools, force_hints_per,
                 request_tag, answer_tag, force_hint_token_range,
             )
         else:
             return await self._generate_with_hints_async_token_spliced(
-                prompts, hints_list,
+                prompts, pools,
                 request_tag, answer_tag,
             )
 
     async def _generate_with_hints_async_token_spliced(
         self,
         prompts: list[list[dict]],
-        hints_list: list[list[str]],
+        pools: list[_HintPool],
         request_tag: str,
         answer_tag: str,
     ) -> list[list[dict]]:
@@ -1320,8 +1394,7 @@ class AsyncGenerator(_SamplingParams):
         completed_count = [0]
 
         async def process_single_prompt(idx: int):
-            hints = hints_list[idx]
-            last_given_index = -1
+            pool = pools[idx]
             accumulated_text = ""
             num_hints_used = 0
             model_token_count = 0
@@ -1395,34 +1468,16 @@ class AsyncGenerator(_SamplingParams):
 
                 # Check if hint was requested
                 if request_tag in generated_text:
-                    if last_given_index + 1 < len(hints):
-                        next_idx = last_given_index + 1
-                        hint_text, new_last = hints[next_idx], next_idx
-
-                        if hint_text is not None:
-                            last_given_index = new_last
-                            num_hints_used += 1
-
-                            # Inject hint — tokenize independently (matches RL splicing)
-                            hint_response = _hint_injection(hint_text, self.config.nested_request)
-                            hint_tokens = tokenizer.encode(hint_response, add_special_tokens=False)
-                            accumulated_text += hint_response
-                            accumulated_tokens.append(hint_tokens)
-
-                            if self.config.verbose:
-                                print(f"Prompt {idx + 1} got hint (last_given={new_last}), continuing...")
-                        else:
-                            warning = _hint_injection("No more hints available.", self.config.nested_request)
-                            warning_tokens = tokenizer.encode(warning, add_special_tokens=False)
-                            accumulated_text += warning
-                            accumulated_tokens.append(warning_tokens)
-                            num_hints_used += 1
-                    else:
-                        warning = _hint_injection("No more hints available.", self.config.nested_request)
-                        warning_tokens = tokenizer.encode(warning, add_special_tokens=False)
-                        accumulated_text += warning
-                        accumulated_tokens.append(warning_tokens)
-                        num_hints_used += 1
+                    hint_text = pool.serve(generated_text)
+                    # Inject hint — tokenize independently (matches RL splicing)
+                    hint_response = _hint_injection(
+                        hint_text if hint_text is not None else "No more hints available.",
+                        self.config.nested_request)
+                    accumulated_text += hint_response
+                    accumulated_tokens.append(tokenizer.encode(hint_response, add_special_tokens=False))
+                    num_hints_used += 1
+                    if self.config.verbose and hint_text is not None:
+                        print(f"Prompt {idx + 1} got hint, continuing...")
                 else:
                     # No hint requested and no answer
                     if final_output.outputs[0].finish_reason == "stop" and answer_tag not in accumulated_text:
@@ -1463,7 +1518,7 @@ class AsyncGenerator(_SamplingParams):
     async def _generate_with_hints_async_text_based(
         self,
         prompts: list[list[dict]],
-        hints_list: list[list[str]],
+        pools: list[_HintPool],
         force_hints_per: list[int],
         request_tag: str,
         answer_tag: str,
@@ -1490,8 +1545,8 @@ class AsyncGenerator(_SamplingParams):
         async def process_single_prompt(idx: int):
             import random as _random
             messages = copy.deepcopy(prompts[idx])
-            hints = hints_list[idx]
-            last_given_index = -1
+            pool = pools[idx]
+            answer_open = "<answer_1>" if self.config.subpart_requests else "<answer>"
             accumulated_text = ""
             num_hints_used = 0
             turns = 0
@@ -1507,7 +1562,7 @@ class AsyncGenerator(_SamplingParams):
                     finish_reason = "length"
                     break
 
-                needs_forcing = prompt_force > 0 and num_hints_used < prompt_force and last_given_index + 1 < len(hints)
+                needs_forcing = prompt_force > 0 and num_hints_used < prompt_force and pool.has_more()
                 turn_request_tag = request_tag
                 if needs_forcing:
                     cap = force_rng.randint(force_hint_token_range[0], force_hint_token_range[1])
@@ -1525,7 +1580,7 @@ class AsyncGenerator(_SamplingParams):
                     # unmatchable and "request" is banned, so no further hint can
                     # be served -- the model has to finish with what it has.
                     capped = self.config.exact_hints and (
-                        num_hints_used >= prompt_force or last_given_index + 1 >= len(hints))
+                        num_hints_used >= prompt_force or not pool.has_more())
                     params = self._sampling_params(
                         temperature=self.config.temperature,
                         top_p=self.config.top_p,
@@ -1556,18 +1611,17 @@ class AsyncGenerator(_SamplingParams):
                 accumulated_text += generated_text
 
                 if answer_tag in accumulated_text:
-                    if prompt_force > 0 and num_hints_used < prompt_force and last_given_index + 1 < len(hints):
+                    if prompt_force > 0 and num_hints_used < prompt_force and pool.has_more():
                         accumulated_text = _close_think_for_request(
                             accumulated_text,
                             _pick_transition(force_rng, self.config.hint_transition),
                             nested=self.config.nested_request,
                             rng=force_rng,
+                            answer_open=answer_open,
                         )
-                        next_idx = last_given_index + 1
-                        hint = hints[next_idx]
-                        last_given_index = next_idx
+                        request, hint = pool.force()
                         num_hints_used += 1
-                        forced = "\n<request></request>" + _hint_injection(hint, self.config.nested_request)
+                        forced = "\n" + request + _hint_injection(hint, self.config.nested_request)
                         accumulated_text += forced
                         messages = copy.deepcopy(prompts[idx])
                         if messages and messages[-1]["role"] == "assistant":
@@ -1579,18 +1633,17 @@ class AsyncGenerator(_SamplingParams):
                     break
 
                 if prompt_force > 0 and think_tag in generated_text and request_tag not in generated_text:
-                    if num_hints_used < prompt_force and last_given_index + 1 < len(hints):
+                    if num_hints_used < prompt_force and pool.has_more():
                         accumulated_text = _close_think_for_request(
                             accumulated_text,
                             _pick_transition(force_rng, self.config.hint_transition),
                             nested=self.config.nested_request,
                             rng=force_rng,
+                            answer_open=answer_open,
                         )
-                        next_idx = last_given_index + 1
-                        hint = hints[next_idx]
-                        last_given_index = next_idx
+                        request, hint = pool.force()
                         num_hints_used += 1
-                        forced = "\n<request></request>" + _hint_injection(hint, self.config.nested_request)
+                        forced = "\n" + request + _hint_injection(hint, self.config.nested_request)
                         accumulated_text += forced
                         messages = copy.deepcopy(prompts[idx])
                         if messages and messages[-1]["role"] == "assistant":
@@ -1598,22 +1651,21 @@ class AsyncGenerator(_SamplingParams):
                         else:
                             messages.append({"role": "assistant", "content": accumulated_text})
                         if self.config.verbose:
-                            print(f"Prompt {idx + 1} forced hint {last_given_index + 1}, continuing...")
+                            print(f"Prompt {idx + 1} forced hint {num_hints_used}, continuing...")
                         continue
 
                 if prompt_force > 0 and final_output.outputs[0].finish_reason == "length":
-                    if num_hints_used < prompt_force and last_given_index + 1 < len(hints):
+                    if num_hints_used < prompt_force and pool.has_more():
                         accumulated_text = _close_think_for_request(
                             accumulated_text,
                             _pick_transition(force_rng, self.config.hint_transition),
                             nested=self.config.nested_request,
                             rng=force_rng,
+                            answer_open=answer_open,
                         )
-                        next_idx = last_given_index + 1
-                        hint = hints[next_idx]
-                        last_given_index = next_idx
+                        request, hint = pool.force()
                         num_hints_used += 1
-                        forced = "\n<request></request>" + _hint_injection(hint, self.config.nested_request)
+                        forced = "\n" + request + _hint_injection(hint, self.config.nested_request)
                         accumulated_text += forced
                         messages = copy.deepcopy(prompts[idx])
                         if messages and messages[-1]["role"] == "assistant":
@@ -1621,49 +1673,23 @@ class AsyncGenerator(_SamplingParams):
                         else:
                             messages.append({"role": "assistant", "content": accumulated_text})
                         if self.config.verbose:
-                            print(f"Prompt {idx + 1} token-capped, forced hint {last_given_index + 1}, continuing...")
+                            print(f"Prompt {idx + 1} token-capped, forced hint {num_hints_used}, continuing...")
                         continue
 
                 if turn_request_tag in generated_text:
-                    if last_given_index + 1 < len(hints):
-                        next_idx = last_given_index + 1
-                        hint_text, new_last = hints[next_idx], next_idx
-
-                        if hint_text is not None:
-                            last_given_index = new_last
-                            num_hints_used += 1
-
-                            hint_response = _hint_injection(hint_text, self.config.nested_request)
-                            accumulated_text += hint_response
-
-                            if messages and messages[-1]["role"] == "assistant":
-                                messages[-1]["content"] += generated_text + hint_response
-                            else:
-                                messages.append({
-                                    "role": "assistant",
-                                    "content": generated_text + hint_response,
-                                })
-
-                            if self.config.verbose:
-                                print(f"Prompt {idx + 1} got hint (last_given={new_last}), continuing...")
-                        else:
-                            warning = _hint_injection("No more hints available.", self.config.nested_request)
-                            accumulated_text += warning
-                            num_hints_used += 1
-                            messages = copy.deepcopy(prompts[idx])
-                            if messages and messages[-1]["role"] == "assistant":
-                                messages[-1]["content"] += accumulated_text
-                            else:
-                                messages.append({"role": "assistant", "content": accumulated_text})
+                    hint_text = pool.serve(generated_text)
+                    num_hints_used += 1
+                    hint_response = _hint_injection(
+                        hint_text if hint_text is not None else "No more hints available.",
+                        self.config.nested_request)
+                    accumulated_text += hint_response
+                    messages = copy.deepcopy(prompts[idx])
+                    if messages and messages[-1]["role"] == "assistant":
+                        messages[-1]["content"] += accumulated_text
                     else:
-                        warning = _hint_injection("No more hints available.", self.config.nested_request)
-                        accumulated_text += warning
-                        num_hints_used += 1
-                        messages = copy.deepcopy(prompts[idx])
-                        if messages and messages[-1]["role"] == "assistant":
-                            messages[-1]["content"] += accumulated_text
-                        else:
-                            messages.append({"role": "assistant", "content": accumulated_text})
+                        messages.append({"role": "assistant", "content": accumulated_text})
+                    if self.config.verbose and hint_text is not None:
+                        print(f"Prompt {idx + 1} got hint, continuing...")
                 else:
                     if final_output.outputs[0].finish_reason == "stop" and answer_tag not in accumulated_text:
                         accumulated_text += "</think>\n"

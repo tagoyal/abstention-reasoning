@@ -7,15 +7,61 @@ each subpart to the base task's own checker, so composed scoring can never
 drift from single-problem scoring.
 """
 
+import importlib.util
 import random
 import re
 from collections import defaultdict
+from pathlib import Path
 
 from pipeline.core.method import TASKS_ROOT
 
 COMPOSED_TASKS = ("math", "countdown")
 
 _ANSWER_I = re.compile(r"<answer_(\d+)>(.*?)</answer_\1>", re.DOTALL | re.IGNORECASE)
+
+
+_RECIPE_SHARED = Path(__file__).resolve().parents[2] / "verl" / "recipe" / "shared"
+_REQUEST_ANY = re.compile(r"<request>(.*?)</request>", re.DOTALL)
+EXHAUSTED_MARKER = "No more hints available."
+
+
+def _load_recipe(name: str):
+    # Recipes are standalone files (custom_reward_function.path), not a package.
+    spec = importlib.util.spec_from_file_location(f"composed_{name}", _RECIPE_SHARED / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_reward = _load_recipe("composed_reward")
+_grammar = _load_recipe("nested_grammar")
+
+
+def composed_hint_malformed(generation: str, k: int) -> str | None:
+    """Why a subpart-request generation is malformed, or None if it is clean.
+
+    Strict by design, for SFT filtering: any request other than a bare subpart
+    id 1..K, a subpart requested twice, an exhausted-pool response, a bad
+    <answer_1>..<answer_K> block, or a violation of the inline-request grammar
+    the RL reward enforces (checked on the same rewrite the reward scores).
+    """
+    opens = generation.count("<request>")
+    ids = _REQUEST_ANY.findall(generation)
+    if opens != len(ids) or generation.count("</request>") != len(ids):
+        return "request_format"
+    if any(not re.fullmatch(r"\d+", i) or not 1 <= int(i) <= k for i in ids):
+        return "request_id"
+    if len(set(ids)) != len(ids):
+        return "repeated_request"
+    if EXHAUSTED_MARKER in generation:
+        return "exhausted"
+    parts = _reward.split_composed_response(_reward.normalize_requests(generation, k), k)
+    if parts is None:
+        return "answer_block"
+    prefix, _ = parts
+    if _grammar.has_malformed_structure_nested(f"{prefix}\n\n<answer>x</answer>"):
+        return "grammar"
+    return None
 
 
 def check_composed_task(task_name: str) -> None:
@@ -80,6 +126,11 @@ def extract_composed_answers(generation: str, k: int) -> list[str | None]:
     return answers
 
 
+def _num_subparts(record: dict) -> int:
+    gt = record.get("ground_truth") or {}
+    return int(gt.get("num_subparts") or len(gt.get("subproblems") or []))
+
+
 class ComposedTask:
     """Wraps a base task so generate/evaluate grade composed datapoints.
 
@@ -87,9 +138,10 @@ class ComposedTask:
     filter_for_sft, ...) is delegated to the base task.
     """
 
-    def __init__(self, base):
+    def __init__(self, base, subpart_requests: bool = False):
         self.base = base
         self.name = base.name
+        self.subpart_requests = subpart_requests
 
     def __getattr__(self, attr):
         return getattr(self.base, attr)
@@ -120,7 +172,22 @@ class ComposedTask:
         }
         if all(a is None for a in answers):
             meta["error"] = "no_answer_tag"
+        if self.subpart_requests:
+            meta["malformed_reason"] = composed_hint_malformed(generation, k)
         return n_correct == k, meta
+
+    def filter_for_sft(self, examples: list[dict], include_wrong_valid_format: bool = False,
+                       nested_request: bool = False, **kwargs) -> list[dict]:
+        """Subpart-request methods keep only correct, strictly well-formed
+        generations; other composed methods use the base task's filter."""
+        if not self.subpart_requests:
+            return self.base.filter_for_sft(examples, include_wrong_valid_format=include_wrong_valid_format,
+                                            nested_request=nested_request, **kwargs)
+        return [
+            ex for ex in examples
+            if ex.get("correct", False)
+            and composed_hint_malformed(ex.get("generation", ""), _num_subparts(ex)) is None
+        ]
 
     def compute_metrics(self, results: list[dict]) -> dict:
         """`accuracy` = all K subparts correct; also per-subpart accuracy, the
@@ -148,6 +215,31 @@ class ComposedTask:
                 i: d["correct"] / d["total"] for i, d in sorted(by_position.items())
             },
             "n_subparts_correct_distribution": dict(sorted(dist.items())),
+            **self._hint_metrics(results),
+        }
+
+    @staticmethod
+    def _hint_metrics(results: list[dict]) -> dict:
+        if not any("num_hints" in r or "malformed_reason" in r for r in results):
+            return {}
+        total = len(results)
+        hinted = [r for r in results if r.get("num_hints", 0) > 0]
+        unhinted = [r for r in results if r.get("num_hints", 0) == 0]
+        reasons = defaultdict(int)
+        for r in results:
+            if r.get("malformed_reason"):
+                reasons[r["malformed_reason"]] += 1
+
+        def acc(rs):
+            return sum(1 for r in rs if r.get("correct")) / len(rs) if rs else 0
+
+        return {
+            "avg_hints": sum(r.get("num_hints", 0) for r in results) / total if total else 0,
+            "hint_rate": len(hinted) / total if total else 0,
+            "accuracy_with_hints": acc(hinted),
+            "accuracy_without_hints": acc(unhinted),
+            "malformed_rate": sum(reasons.values()) / total if total else 0,
+            "malformed_reasons": dict(sorted(reasons.items())),
         }
 
     def format_metrics(self, metrics: dict, model_name: str | None = None) -> str:
@@ -168,4 +260,10 @@ class ComposedTask:
         lines.append("Subparts correct per datapoint:")
         for n, count in metrics["n_subparts_correct_distribution"].items():
             lines.append(f"  {n}: {count}")
+        if "avg_hints" in metrics:
+            lines.append(f"Avg hints: {metrics['avg_hints']:.2f}  "
+                         f"hint rate: {metrics['hint_rate']:.2%}")
+            lines.append(f"Accuracy with hints: {metrics['accuracy_with_hints']:.2%}  "
+                         f"without: {metrics['accuracy_without_hints']:.2%}")
+            lines.append(f"Malformed: {metrics['malformed_rate']:.2%} {metrics['malformed_reasons']}")
         return "\n".join(lines)

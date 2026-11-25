@@ -378,6 +378,7 @@ class vLLMRollout(BaseRollout):
             max_response_len=int(think_budget) if think_budget else self.config.response_length,
             answer_budget=int(self.config.get("answer_budget", 0) or 0),
             nested_request=self.nested_request,
+            subpart_requests=int(self.config.get("subpart_requests", 0) or 0),
         )
         continuous = bool(self.config.get("continuous_hints", False))
         if not getattr(self, "_logged_budgets", False):
@@ -392,7 +393,7 @@ class vLLMRollout(BaseRollout):
         turn_params = copy.deepcopy(sampling_params)
         turn_params.n = 1
         answer_params = copy.deepcopy(turn_params)
-        answer_params.stop = ["</answer>"]
+        answer_params.stop = [config.answer_close]
         answer_params.include_stop_str_in_output = False
 
         loop = HintLoop(

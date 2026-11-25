@@ -15,6 +15,15 @@ method (baseline, method_b, ...) gets a composed variant by setting
 `composed: true` in its config. train_rl routes the reward here and passes the
 base scorer as `base_reward_path` / `base_reward_name`.
 
+Hint methods: the prefix is shared, so every subpart is scored with the
+total hint count of the whole rollout. Under "min" the composed score is
+therefore min-accuracy across subparts, then the hint cost for all hints used
+(e.g. 1 - 0.1 * total_hints when every subpart is correct, the format score
+otherwise). Composed requests name a subpart, `<request>i</request>`; valid
+ids (1..K) are rewritten to the base grammar's bare `<request></request>`,
+and any other request content is left as-is so the base validator marks the
+rollout malformed.
+
 Loaded by path (custom_reward_function.path), so it imports nothing from the
 pipeline package.
 """
@@ -25,7 +34,15 @@ from pathlib import Path
 
 _NUMBERED_TAG = re.compile(r"</?answer_(\d+)>")
 _NUMBERED_ANSWER = re.compile(r"<answer_(\d+)>(.*?)</answer_\1>", re.DOTALL)
+_ARG_REQUEST = re.compile(r"<request>(\d+)</request>")
 _BASE_CACHE: dict = {}
+
+
+def normalize_requests(solution_str: str, num_subparts: int) -> str:
+    """Rewrite `<request>i</request>` with 1 <= i <= K to `<request></request>`."""
+    def repl(match):
+        return "<request></request>" if 1 <= int(match.group(1)) <= num_subparts else match.group(0)
+    return _ARG_REQUEST.sub(repl, solution_str)
 
 
 def _load_base(path: str, name: str):
@@ -85,7 +102,8 @@ def compute_score(
 
     compose_aggregate: "min" (default) pays full score only when every subpart
     is correct, matching the all-K correctness used for SFT filtering and eval;
-    "mean" gives partial credit per subpart.
+    "mean" gives partial credit per subpart. Hint costs use the rollout's
+    total hint count (see module docstring).
     All remaining kwargs are forwarded to the base scorer.
     """
     if base_reward_path is None:
@@ -93,6 +111,7 @@ def compute_score(
     base = _load_base(base_reward_path, base_reward_name)
     subproblems = _as_list(ground_truth["subproblems"])
     k = int(ground_truth.get("num_subparts", len(subproblems)))
+    solution_str = normalize_requests(solution_str, k)
 
     parts = split_composed_response(solution_str, k)
     if parts is None:

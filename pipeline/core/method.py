@@ -123,6 +123,17 @@ class Method:
         if compose_k is None or compose_k < 1:
             raise ValueError(f"Method '{self.name}' requires --compose-k K (K >= 1)")
         self.compose_k = compose_k
+        if self.subpart_requests:
+            # One hint (the full solution) per subpart; room for every hint,
+            # the capped exhausted requests, and the final answer turn.
+            self.max_hints = compose_k
+            max_exhausted = self.reward_kwargs.get("max_exhausted_requests") or 0
+            self.max_turns = max(self.max_turns, compose_k + max_exhausted + 1)
+
+    @property
+    def subpart_requests(self) -> bool:
+        """Composed hint methods: requests name a subpart, <request>i</request>."""
+        return self.composed and self.multi_turn
 
     # Backwards compatibility alias
     @property
