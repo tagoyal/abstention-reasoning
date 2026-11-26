@@ -75,6 +75,7 @@ if [ ! -f "${PROMPTS_DIR}/rl_train__${METHOD}__k${COMPOSE_K}.parquet" ] || \
 fi
 
 python -m pipeline train_rl \
+  --total-steps 800 \
   --task "${TASK}" \
   --method "${METHOD}" \
   --compose-k "${COMPOSE_K}" \
