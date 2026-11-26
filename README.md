@@ -142,6 +142,41 @@ Run `python -m pipeline list_methods --task <task>` to list what a task actually
 
 Reward functions themselves live with the trainer, in `verl/recipe/{task}/reward_function.py`; a method config selects one by name and passes it `reward_kwargs`.
 
+### Method AC composed: fixed subpart solutions
+
+`method_ac_composed` supports Math and Countdown. `create_prompts --compose-k K`
+uses the same disjoint groups as `baseline_composed`, then emits all `2^K`
+solution subsets for each group on every split. Each selected subpart receives
+its complete solution; the empty subset explicitly says
+`No subpart solutions provided`. Answers use the usual numbered composed tags.
+
+```bash
+python -m pipeline create_prompts --task countdown --method method_ac_composed \
+  --compose-k 2 --split all --data-name countdown
+
+python -m pipeline stitch_composed_sft --task countdown --method method_ac_composed \
+  --compose-k 2 --split sft_train \
+  --source data/countdown/sft_datasets/sft_train__baseline.json \
+  --data-name countdown
+```
+
+Unlike baseline stitching, this consumes the **existing prompt datapoints**:
+it preserves their groups, order, and hint subsets, stitches correct unaided
+traces for their exact source problems, and skips datapoints missing a usable
+trace. It writes one example per eligible datapoint and requires `--rounds 1`.
+The output has the `__stitched.json` suffix.
+
+`bash launch_scripts/run_sft_data_composer_ac.sh countdown 2` prepares both SFT
+splits from existing `sft_{train,val}__baseline.json` files (shards also work).
+Set `BASELINE_SFT_DIR` to use another source directory. For Math, pass `math`;
+its default data namespace is `math_o3`. Existing prompt files are reused.
+
+`run_train_composer_ac.sh` accepts the training launcher's usual arguments.
+It initializes SFT from the latest dated `MM_DD-baseline-<model>/model` run
+(ordered by `MM_DD`) in `models/<data-name>/baseline_rl/`, then runs RL using
+`rl_train`/`rl_val` and the same composed baseline reward, with `min` aggregation
+and no hint penalty. Set `SFT_MODEL` to skip SFT.
+
 ### Method A: per-rollout predictor SFT
 
 `create_verification_data --method method_a` retains every solver rollout as a

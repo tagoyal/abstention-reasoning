@@ -619,7 +619,8 @@ def main():
              "--num-samples 8 --sample-strategy random_correct")
     p.add_argument("--rounds", type=int, default=1,
         help="Groupings of the solved problems (seed, seed+1, ...); each solved problem "
-             "appears in up to this many datapoints")
+             "appears in up to this many datapoints. method_ac_composed requires 1 "
+             "and uses existing create_prompts datapoints instead of regrouping.")
     p.add_argument("--seed", type=int, default=42, help="Grouping seed")
     p.add_argument("--output",
         help="Output path (default: data/{data_name}/sft_datasets/{split}__{method}__k{K}__stitched.json)")

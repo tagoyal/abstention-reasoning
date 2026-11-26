@@ -4,6 +4,7 @@ Data commands - primitives and prompts creation.
 
 import gc
 import inspect
+import itertools
 import json
 import random
 import re
@@ -593,6 +594,8 @@ def _create_composed_prompts_single(
     into disjoint groups of K (sampling without replacement); the remainder of
     N mod K problems is dropped. ground_truth holds each subpart's own base
     ground truth, so grading reuses the base task's checker per subpart.
+    method_ac_composed expands each fixed group into every subset of subparts
+    whose full solutions are provided in the prompt, including the empty set.
     """
     from pipeline.core.composed import (
         build_composed_fields,
@@ -617,26 +620,49 @@ def _create_composed_prompts_single(
     subproblem_template = load_subproblem_template(task_name, method.template_variant)
     template = method.load_template(task_name, split_name.split("_")[0])
     system_message = getattr(task, "system_message", None)
+    fixed_hints = method.name == "method_ac_composed"
 
     records = []
     for group_index, group in enumerate(groups):
-        fields = build_composed_fields(group, subproblem_template)
-        record = _composed_base_record(task, task_name, method, group, group_index, split_name)
-        ground_truth = record["ground_truth"]
-        if is_parquet:
-            # verl renders `primitive` into rl.txt at train time.
-            record.update({
-                "primitive": fields,
-                "data_source": task_name,
-                "assistant_prefix": assistant_prefix,
-                "extra_info": {"index": group_index},
-                "reward_model": {"style": "rule", "ground_truth": ground_truth},
-            })
-        else:
-            record["prompt"] = _composed_messages(
-                system_message, render_fields(template, fields),
-                assistant_prefix if include_assistant_prefix else None)
-        records.append(record)
+        subsets = (
+            itertools.chain.from_iterable(
+                itertools.combinations(range(1, k + 1), n) for n in range(k + 1)
+            )
+            if fixed_hints else [()]
+        )
+        solutions = [composed_solution_hint(p, task_name) for p in group] if fixed_hints else []
+        for subset in subsets:
+            record_index = len(records)
+            fields = build_composed_fields(group, subproblem_template)
+            record = _composed_base_record(task, task_name, method, group, record_index, split_name)
+            if fixed_hints:
+                hint_sequence = "\n\n".join(
+                    f"Solution to Subpart {i}:\n{solutions[i - 1]}" for i in subset
+                ) if subset else "No subpart solutions provided"
+                # Keep raw problem text last, as in build_composed_fields.
+                subproblems = fields.pop("subproblems")
+                fields.update(hint_sequence=hint_sequence, subproblems=subproblems)
+                record.update(
+                    source_index=group_index,
+                    hinted_subparts=list(subset),
+                    hint_level=len(subset),
+                    hint_sequence=hint_sequence,
+                )
+            ground_truth = record["ground_truth"]
+            if is_parquet:
+                # verl renders `primitive` into rl.txt at train time.
+                record.update({
+                    "primitive": fields,
+                    "data_source": task_name,
+                    "assistant_prefix": assistant_prefix,
+                    "extra_info": {"index": record_index},
+                    "reward_model": {"style": "rule", "ground_truth": ground_truth},
+                })
+            else:
+                record["prompt"] = _composed_messages(
+                    system_message, render_fields(template, fields),
+                    assistant_prefix if include_assistant_prefix else None)
+            records.append(record)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if is_parquet:
@@ -705,6 +731,9 @@ def stitch_composed_sft(
     are re-graded, so every kept record is correct by construction.
 
     Only methods without subpart requests: a stitched trace never asks for a hint.
+    method_ac_composed instead consumes its existing create_prompts datapoints,
+    preserving their groups and hint subsets. It writes one example per eligible
+    datapoint and skips any whose subparts lack correct unaided source traces.
     """
     from pipeline.core.composed import (
         ComposedTask,
@@ -723,7 +752,23 @@ def stitch_composed_sft(
         raise ValueError(f"stitch_composed_sft needs a composed method without subpart requests, got {method_name}")
     if rounds < 1:
         raise ValueError(f"rounds must be >= 1, got {rounds}")
+    fixed_hints = method.name == "method_ac_composed"
+    if fixed_hints and rounds != 1:
+        raise ValueError("method_ac_composed uses fixed prompt datapoints and requires --rounds 1")
     task = get_task(task_name)
+    prompt_records = None
+    if fixed_hints:
+        prompts_path = method.formatted_path(data_name, split_name)
+        try:
+            prompt_records = load_prompts(
+                prompts_path, template=method.load_template(task_name, split_name.split("_")[0]),
+                system_message=getattr(task, "system_message", None),
+            )
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"No composed prompts at {prompts_path}. Run create_prompts for "
+                f"{method_name} --compose-k {compose_k} --split {split_name} first."
+            ) from exc
     k = method.compose_k
 
     problems = load_json(partition_path(data_name, split_name))
@@ -759,31 +804,41 @@ def stitch_composed_sft(
         traces.setdefault(problem["index"], (trace, rec))
 
     solved = [p for p in problems if p["index"] in traces]
-    groups, seen = [], set()
-    for r in range(rounds):
-        for group in group_disjoint(solved, k, seed + r):
-            key = frozenset(p["index"] for p in group)
-            if key not in seen:
-                seen.add(key)
-                groups.append(group)
-
-    subproblem_template = load_subproblem_template(task_name, method.template_variant)
-    template = method.load_template(task_name, split_name.split("_")[0])
-    system_message = getattr(task, "system_message", None)
-    assistant_prefix = getattr(task, "assistant_prefix", None)
+    if prompt_records is None:
+        groups, seen = [], set()
+        for r in range(rounds):
+            for group in group_disjoint(solved, k, seed + r):
+                key = frozenset(p["index"] for p in group)
+                if key not in seen:
+                    seen.add(key)
+                    groups.append(group)
+        subproblem_template = load_subproblem_template(task_name, method.template_variant)
+        template = method.load_template(task_name, split_name.split("_")[0])
+        system_message = getattr(task, "system_message", None)
+        assistant_prefix = getattr(task, "assistant_prefix", None)
+        prompt_records = []
+        for group in groups:
+            record = _composed_base_record(task, task_name, method, group, len(prompt_records), split_name)
+            fields = build_composed_fields(group, subproblem_template)
+            record["prompt"] = _composed_messages(system_message, render_fields(template, fields), assistant_prefix)
+            prompt_records.append(record)
     composed_task = ComposedTask(task)
 
     records = []
-    for group in groups:
-        record = _composed_base_record(task, task_name, method, group, len(records), split_name)
-        fields = build_composed_fields(group, subproblem_template)
-        record["prompt"] = _composed_messages(system_message, render_fields(template, fields), assistant_prefix)
-        generation = stitched_composed_generation([traces[p["index"]][0] for p in group])
+    missing_traces = 0
+    for record in prompt_records:
+        indices = record["source_indices"]
+        if any(i not in traces for i in indices):
+            missing_traces += 1
+            continue
+        generation = stitched_composed_generation([traces[i][0] for i in indices])
         correct, metadata = composed_task.check_correctness(record["ground_truth"], generation)
         if not correct:
             counts["regrade_failed"] += 1
             continue
-        sources = [traces[p["index"]][1] for p in group]
+        if not fixed_hints:
+            record["index"] = len(records)
+        sources = [traces[i][1] for i in indices]
         record.update({
             "generation": generation,
             "correct": True,
@@ -802,6 +857,8 @@ def stitch_composed_sft(
           f"{counts['regrade_failed']} failing re-grade")
     print(f"{len(solved)}/{len(problems)} problems solved; {rounds} round(s) -> "
           f"{len(records)} stitched K={k} datapoints saved to {output_path}")
+    if fixed_hints:
+        print(f"Skipped {missing_traces} fixed prompt datapoints missing correct source traces")
     return output_path
 
 

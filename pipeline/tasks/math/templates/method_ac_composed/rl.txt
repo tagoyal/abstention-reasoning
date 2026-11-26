@@ -1,0 +1,10 @@
+You are given a problem with {num_subparts} independent subparts. Solve each subpart.
+
+{subproblems}
+
+Think through all subparts step by step in <think> </think> tags. When you are finished thinking, close with </think> and IMMEDIATELY provide the final answer to every subpart, each in its own numbered tag, with no other text:
+{answer_tags}
+
+To help you solve this problem, an expert may have provided complete solutions to some subparts below. Assume that any provided solutions are correct and use them to solve those subparts. Solve the remaining subparts yourself.
+
+{hint_sequence}

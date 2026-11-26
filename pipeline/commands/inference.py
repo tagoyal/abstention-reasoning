@@ -566,6 +566,7 @@ def copy_source_fields(record: dict, prompt_data: dict) -> None:
         "source_index",
         "hint_level",
         "hint_sequence",
+        "hinted_subparts",
         "ground_truth",
         "split",
         "source_indices",

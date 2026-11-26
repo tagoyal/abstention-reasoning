@@ -1,0 +1,5 @@
+template_variant: method_ac_composed
+composed: true
+reward_function: compute_score
+reward_kwargs:
+  compose_aggregate: min
