@@ -25,13 +25,14 @@ set -euo pipefail
 
 TASKS=(countdown)
 DATA_NAME=countdown
-RUN_TRAIN_SCRIPT="run_train_composer.sh"
+RUN_TRAIN_SCRIPT="run_train_composer_b.sh"
 COMPOSE_K=2
-SFT_DATA_DESC=stitched
+SFT_DATA_DESC="" #stitched
 SUCCESS_UPDATE_BACKBONE=true
 MODELS=(qwen2.5-3b qwen3-4b) #) # 
-ALPHA=2
+ALPHA=1
 BASE=0.1
+# Runner arguments: task, model, HF model, data name, backbone flag, K, alpha, base, SFT suffix.
 
 
 # Short name -> HuggingFace base model id. Qwen3 models use the -Base
@@ -63,11 +64,7 @@ for TASK in "${TASKS[@]}"; do
   for MODEL in "${MODELS[@]}"; do
     HF_MODEL="${MODEL_MAP[$MODEL]}"
     GPUS="${GPU_MAP[$MODEL]}"
-    RUN_TRAIN_ARG="${SUCCESS_UPDATE_BACKBONE}"
-    if [[ "${RUN_TRAIN_SCRIPT}" == "run_train_composer.sh" ]]; then
-      RUN_TRAIN_ARG="${COMPOSE_K}"
-    fi
-    sed "s|__TASK__|${TASK}|; s|__MODEL__|${MODEL}|; s|__HF_MODEL__|${HF_MODEL}|; s|__GPUS__|${GPUS}|; s|__DATA_NAME__|${DATA_NAME}|; s|__RUN_TRAIN_ARG__|${RUN_TRAIN_ARG}|; s|__SFT_DATA_DESC__|${SFT_DATA_DESC}|; s|__RUN_TRAIN_SCRIPT__|${RUN_TRAIN_SCRIPT}|" launch_scripts/submit_train_template.yaml \
+    sed "s|__TASK__|${TASK}|; s|__MODEL__|${MODEL}|; s|__HF_MODEL__|${HF_MODEL}|; s|__GPUS__|${GPUS}|; s|__DATA_NAME__|${DATA_NAME}|; s|__SUCCESS_UPDATE_BACKBONE__|${SUCCESS_UPDATE_BACKBONE}|; s|__COMPOSE_K__|${COMPOSE_K}|; s|__ALPHA__|${ALPHA}|; s|__BASE__|${BASE}|; s|__SFT_DATA_DESC__|${SFT_DATA_DESC}|; s|__RUN_TRAIN_SCRIPT__|${RUN_TRAIN_SCRIPT}|" launch_scripts/submit_train_template.yaml \
       | kubectl create -f -
   done
 done

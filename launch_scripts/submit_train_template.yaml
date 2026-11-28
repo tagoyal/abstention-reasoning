@@ -5,7 +5,7 @@ metadata:
   namespace: bonete52
 
 spec:
-  queue: bonete52
+  queue: bonete52-opp
   priorityClassName: high
   minAvailable: 1
 
@@ -49,7 +49,7 @@ spec:
           command:
           - /bin/bash
           - -lc
-          - source /data/tanyagoyal/models/initialization_script.sh && bash launch_scripts/__RUN_TRAIN_SCRIPT__ __TASK__ __MODEL__ __HF_MODEL__ __DATA_NAME__ __RUN_TRAIN_ARG__
+          - source /data/tanyagoyal/models/initialization_script.sh && bash "launch_scripts/__RUN_TRAIN_SCRIPT__" "__TASK__" "__MODEL__" "__HF_MODEL__" "__DATA_NAME__" "__SUCCESS_UPDATE_BACKBONE__" "__COMPOSE_K__" "__ALPHA__" "__BASE__" "__SFT_DATA_DESC__"
 
           env:
           - name: SFT_DATA_DESC

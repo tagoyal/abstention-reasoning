@@ -2,7 +2,7 @@
 # SFT + RL for method_b_composed.
 # Usage: bash launch_scripts/run_train_composer_b.sh <task> <model_short_name> <hf_base_model> <data_name> [success_update_backbone] [compose_k] [alpha] [base] [sft_data_desc]
 # Arguments 3, 5 and 9 are unused; this runner uses unsuffixed SFT datasets.
-# SFT starts from the dated baseline_composed_rl checkpoint selected below.
+# SFT starts from the latest available dated baseline_composed_rl model checkpoint.
 # Set SFT_MODEL=<path> to skip SFT and start RL from an existing checkpoint.
 
 set -euo pipefail
@@ -25,22 +25,32 @@ if [[ "${MODEL,,}" == *qwen3* ]]; then
 fi
 
 if [[ -z "${SFT_MODEL:-}" ]]; then
-  case "${MODEL}" in
-    qwen2.5-3b)
-      BASELINE_MODEL="models/math_o3/baseline_composed_rl/11_18-baseline_composed-qwen2.5-3b-k2/model"
-      ;;
-    qwen3-4b)
-      BASELINE_MODEL="models/math_o3/baseline_composed_rl/11_19-baseline_composed-qwen3-4b-k2/model"
-      ;;
-    *)
-      echo "No baseline RL checkpoint configured for ${MODEL} in $0." >&2
-      exit 1
-      ;;
-  esac
-  if [[ ! -f "${BASELINE_MODEL}/config.json" ]]; then
-    echo "Baseline RL checkpoint not found: ${BASELINE_MODEL}" >&2
+  export LC_ALL=C
+  shopt -s nullglob
+  BASELINE_MODELS=(
+    models/"${DATA_NAME}"/baseline_composed_rl/[0-1][0-9]_[0-3][0-9]-baseline_composed-"${MODEL}"-k"${COMPOSE_K}"/model
+    models/"${DATA_NAME}"/baseline_composed_rl/[0-1][0-9]_[0-3][0-9]-baseline_composed-"${MODEL}"-k"${COMPOSE_K}"-*/model
+  )
+  shopt -u nullglob
+  BASELINE_MODEL=""
+  BASELINE_DATE=""
+  for CANDIDATE in "${BASELINE_MODELS[@]}"; do
+    [[ -f "${CANDIDATE}/config.json" ]] || continue
+    RUN="${CANDIDATE%/model}"
+    RUN="${RUN##*/}"
+    RUN_DATE="${RUN:0:5}"
+    # Prefer the run date; checkpoint modification time breaks same-date ties.
+    if [[ -z "${BASELINE_MODEL}" || "${RUN_DATE}" > "${BASELINE_DATE}" ]] ||
+       [[ "${RUN_DATE}" == "${BASELINE_DATE}" && "${CANDIDATE}/config.json" -nt "${BASELINE_MODEL}/config.json" ]]; then
+      BASELINE_MODEL="${CANDIDATE}"
+      BASELINE_DATE="${RUN_DATE}"
+    fi
+  done
+  if [[ -z "${BASELINE_MODEL}" ]]; then
+    echo "No available dated baseline_composed_rl checkpoint for ${MODEL} (k${COMPOSE_K}) in models/${DATA_NAME}/baseline_composed_rl." >&2
     exit 1
   fi
+  echo "Initializing SFT from ${BASELINE_MODEL}"
   SFT_MODEL="models/${DATA_NAME}/${METHOD}_sft/${RUN_ID}/model"
   SFT_STEM="data/${DATA_NAME}/sft_datasets"
   python -m pipeline train_sft \

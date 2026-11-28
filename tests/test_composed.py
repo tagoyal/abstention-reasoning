@@ -366,6 +366,58 @@ class ComposedACRunnerTests(unittest.TestCase):
         self.assertEqual([c[0] for c in self.commands()], ["create_prompts", "create_prompts", "train_rl"])
         self.assertIn("existing/model", self.commands()[-1])
 
+    def test_b_training_selects_latest_matching_baseline_checkpoint(self):
+        runs = [
+            ("countdown", "11_19-baseline_composed-qwen3-4b-k2", 500),
+            ("countdown", "11_26-baseline_composed-qwen3-4b-k2-stitched", 100),
+            ("countdown", "11_26-baseline_composed-qwen3-4b-k2-stitched-mean", 200),
+            ("countdown", "11_27-baseline_composed-qwen2.5-3b-k2", 600),
+            ("countdown", "11_27-baseline_composed-qwen3-4b-k20", 600),
+            ("math_o3", "11_27-baseline_composed-qwen3-4b-k2", 600),
+        ]
+        for data, run, timestamp in runs:
+            root = self.root / "models" / data / "baseline_composed_rl" / run
+            best = root / "best"
+            best.mkdir(parents=True)
+            config = best / "config.json"
+            config.write_text("{}")
+            os.utime(config, (timestamp, timestamp))
+            (root / "model").symlink_to("best", target_is_directory=True)
+        incomplete = self.root / "models/countdown/baseline_composed_rl/11_27-baseline_composed-qwen3-4b-k2/model"
+        incomplete.mkdir(parents=True)
+        result = self.run_script("run_train_composer_b.sh",
+                                 ["countdown", "qwen3-4b", "unused", "countdown", "true", "2", "1", "0.1"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = self.commands()
+        self.assertEqual([c[0] for c in commands], ["train_sft", "create_prompts", "train_rl"])
+        sft, _, rl = commands
+        self.assertEqual(sft[sft.index("--base-model") + 1],
+                         "models/countdown/baseline_composed_rl/11_26-baseline_composed-qwen3-4b-k2-stitched-mean/model")
+        self.assertIn("--strip-think-tokens", sft)
+        self.assertIn("hint_penalty_alpha=1", rl)
+
+    def test_b_training_selects_unsuffixed_baseline_for_requested_k(self):
+        model = self.root / "models/countdown/baseline_composed_rl/11_26-baseline_composed-qwen2.5-3b-k3/model"
+        model.mkdir(parents=True)
+        (model / "config.json").write_text("{}")
+        result = self.run_script("run_train_composer_b.sh",
+                                 ["countdown", "qwen2.5-3b", "unused", "countdown", "true", "3"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sft = self.commands()[0]
+        self.assertEqual(sft[sft.index("--base-model") + 1], str(model.relative_to(self.root)))
+        self.assertNotIn("--strip-think-tokens", sft)
+
+    def test_b_training_fails_without_baseline_and_can_skip_sft(self):
+        args = ["countdown", "qwen2.5-3b", "unused", "countdown"]
+        result = self.run_script("run_train_composer_b.sh", args)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No available dated baseline_composed_rl checkpoint", result.stderr)
+        self.assertEqual(self.commands(), [])
+        result = self.run_script("run_train_composer_b.sh", args, SFT_MODEL="existing/model")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c[0] for c in self.commands()], ["create_prompts", "train_rl"])
+        self.assertIn("existing/model", self.commands()[-1])
+
     def test_data_runner_uses_existing_baseline_sources_and_fixed_stitching(self):
         sources = self.root / "data/countdown/sft_datasets"
         sources.mkdir(parents=True)
