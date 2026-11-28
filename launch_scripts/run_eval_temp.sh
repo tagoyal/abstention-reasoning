@@ -1,6 +1,6 @@
 #!/bin/bash
 # Usage: bash launch_scripts/run_eval_temp.sh [gpus]
-# Evaluate both checkpoints of the completed, unevaluated RL runs audited on 11/26.
+# Evaluate last/best checkpoints, plus best_* checkpoints for math_o3 method_b runs.
 
 set -euo pipefail
 
@@ -19,6 +19,14 @@ run_eval() {
   local run_dir="${MODELS_ROOT}/${data_name}/${method}_rl/${run_id}"
   local checkpoint model output status
   local compose_args=()
+  local checkpoints=(last best)
+  if [[ "${data_name}" == math_o3 && "${method}" == method_b ]]; then
+    for model in "${run_dir}"/best_*; do
+      if [[ -d "${model}" ]]; then
+        checkpoints+=("${model##*/}")
+      fi
+    done
+  fi
   if [[ "${data_name}" == math_o3 ]]; then
     task=math
   fi
@@ -29,7 +37,7 @@ run_eval() {
   fi
   local prompts="${DATA_ROOT}/${data_name}/problems_with_format/eval__${method}${suffix}.json"
 
-  for checkpoint in last best; do
+  for checkpoint in "${checkpoints[@]}"; do
     model="${run_dir}/${checkpoint}"
     output="${run_dir}/evals/eval${compose_k:+_k${compose_k}}_${checkpoint}_10s.json"
     if [[ ! -s "${prompts}" ]]; then
