@@ -773,7 +773,11 @@ def stitch_composed_sft(
 
     problems = load_json(partition_path(data_name, split_name))
     by_index = {p["index"]: p for p in problems}
-    gt_key = lambda gt: json.dumps(gt, sort_keys=True, default=str)
+    def gt_key(gt):
+        if task_name == "math" and isinstance(gt, dict):
+            gt = {key: gt.get(key) for key in ("problem", "answer")}
+        return json.dumps(gt, sort_keys=True, default=str)
+
     by_gt: dict[str, list[dict]] = {}
     for p in problems:
         by_gt.setdefault(gt_key(task.get_ground_truth(p)), []).append(p)

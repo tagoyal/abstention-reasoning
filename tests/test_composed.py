@@ -142,6 +142,42 @@ class ComposedPromptsTests(unittest.TestCase):
                 self.assertEqual(list(load_parquet_records(output)[0]["primitive"])[-1], "subproblems")
 
 
+    def test_ac_math_stitch_matches_source_with_different_hints_and_indices(self):
+        task = get_task("math")
+        problems = [
+            {"index": i, "problem": f"Compute {i} + 1.", "answer": str(i + 1),
+             "level": "Level 1", "variant": "Algebra",
+             "prefix_hints": {"hint_1": f"New solution for {i}."}}
+            for i in (23, 42)
+        ]
+        save_json(self.data_root / "math" / "problems" / "sft_train.json", problems)
+        prompts_path = create_prompts("math", "method_ac_composed", split_name="sft_train", compose_k=2)
+        prompts = load_json(prompts_path)
+        source = []
+        for i, problem in enumerate(problems):
+            old_problem = {**problem, "prefix_hints": {"hint_1": "Old hints.", "hint_2": "More hints."}}
+            source.append({
+                "index": i, "ground_truth": task.get_ground_truth(old_problem),
+                "generation": f"Add one.</think><answer>{problem['answer']}</answer>",
+                "correct": True,
+            })
+        source.insert(0, {
+            **source[0], "index": 23,
+            "ground_truth": {**source[0]["ground_truth"], "problem": "Different problem."},
+            "generation": "Unrelated reasoning.</think><answer>24</answer>",
+        })
+        src = self.data_root / "baseline.json"
+        save_json(src, source)
+        output = stitch_composed_sft("math", "method_ac_composed", 2, "sft_train", src)
+        records = load_json(output)
+        self.assertEqual(len(records), 4)
+        for record, prompt in zip(records, prompts):
+            self.assertEqual(record["prompt"], prompt["prompt"])
+            self.assertEqual(record["ground_truth"], prompt["ground_truth"])
+            self.assertNotIn("Unrelated reasoning", record["generation"])
+            self.assertTrue(record["correct"])
+
+
     def test_ac_stitch_consumes_exact_prompt_rows_and_skips_incomplete_groups(self):
         task = get_task("countdown")
         problems = countdown_problems(6)
